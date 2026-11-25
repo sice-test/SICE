@@ -900,11 +900,12 @@ export async function obtenerReporteNotasHemisemestre(
       const calificacionValida =
         calificacion?.rubrica_id === rubricaDocente ? calificacion : null
       const docente = calificacionValida
-        ? (Number(calificacionValida.puntaje) / maxDoc) * 100
+        ? (Number(calificacionValida.puntaje) / maxDoc) * 70
         : null
+      // Se usa el promedio actual aunque no todos hayan coevaluado aún.
       const coevaluacion =
-        promedio && promedio.cantidad >= esperadas
-          ? (promedio.promedio / maxCoev) * 100
+        promedio && promedio.cantidad > 0
+          ? (promedio.promedio / maxCoev) * 30
           : null
 
       if (!calificacionValida) pendientesDocente.push(estudiante.nombre)
@@ -924,7 +925,7 @@ export async function obtenerReporteNotasHemisemestre(
         coevaluacion,
         final:
           docente !== null && coevaluacion !== null
-            ? (docente * 0.7 + coevaluacion * 0.3) / 10
+            ? docente + coevaluacion
             : null
       })
     })

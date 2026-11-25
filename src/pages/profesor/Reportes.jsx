@@ -115,7 +115,7 @@ export default function Reportes() {
       if (forzado && pendientes.length > 0) {
         const mensaje = `Reporte generado con notas incompletas: ${pendientes.join(
           '. '
-        )}. Las notas pendientes aparecerán como "Pendiente".`
+        )}. La coevaluación usa el promedio actual de las coevaluaciones recibidas; las notas sin datos aparecerán como "Pendiente".`
         setAdvertencia(mensaje)
         // notificar.aviso(mensaje)
       } else {

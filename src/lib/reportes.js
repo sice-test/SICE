@@ -24,9 +24,9 @@ export function descargarReporteNotasExcel({
       const hemi = formatearHemisemestre(nombre)
 
       return [
-        `${hemi} - Docente/100`,
-        `${hemi} - Coevaluación/100`,
-        `${hemi} - Nota final/10`
+        `${hemi} - Docente`,
+        `${hemi} - Coevaluación`,
+        `${hemi} - Nota final`
       ]
     })
   ]
@@ -90,7 +90,8 @@ export function descargarReporteNotasExcel({
 }
 
 function formatearNumero(valor) {
+  // Celda numérica con formato de 1 decimal (p. ej. 85 se muestra como 85.0)
   return valor === null || valor === undefined
     ? 'Pendiente'
-    : Number(valor.toFixed(1))
+    : { t: 'n', v: Number(valor.toFixed(1)), z: '0.0' }
 }
