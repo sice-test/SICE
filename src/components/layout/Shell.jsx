@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext.jsx'
 import {
@@ -165,9 +165,21 @@ export default function Shell() {
     { to: '/acerca-de', label: 'Acerca de', Icon: InfoOutlinedIcon }
   ]
 
+  // Estudiante: grupo, rol y líder dependen del hemisemestre activo.
+  const contextoActivo = useMemo(() => {
+    if (esStaff || !contexto?.membresias) return contexto
+    const membresia = contexto.membresias[hemisemestreActivo?.id]
+    return {
+      ...contexto,
+      grupoId: membresia?.grupoId ?? null,
+      rolGrupo: membresia?.rolGrupo ?? null,
+      lider: membresia?.lider ?? false
+    }
+  }, [esStaff, contexto, hemisemestreActivo?.id])
+
   const rolTexto = esStaff
     ? 'Profesor'
-    : contexto?.rolGrupo === 'evaluador'
+    : contextoActivo?.rolGrupo === 'evaluador'
       ? 'Evaluador'
       : 'Expositor'
 
@@ -345,7 +357,7 @@ export default function Shell() {
           ) : (
             <Outlet
               context={{
-                contexto,
+                contexto: contextoActivo,
                 paralelos,
                 hemisemestreActivo,
                 hemisemestres,

@@ -7,14 +7,15 @@ import {
   agregarIntegranteGrupo,
   moverIntegrante,
   actualizarTemaGrupo,
-  actualizarRolesGrupo
+  actualizarRolesGrupo,
+  etiquetaHemisemestre
 } from '../../../lib/data.js'
 import {
   Panel,
   Button,
   Aviso,
   Spinner,
-  LoadingSkeleton,
+  Campo,
   Input,
   Select,
   Badge
@@ -31,15 +32,31 @@ import { useRealtimeRefresh } from '../../../lib/realtime.js'
 import BuilderNuevoGrupo from '../../../components/profesor/admin/BuilderNuevoGrupo.jsx'
 import { notificar } from '../../../lib/notifications.js'
 
+// Firma comparable de la composición de un grupo (integrantes, rol y líder).
+function firmaMiembros(miembros) {
+  return (miembros ?? [])
+    .map(m => `${m.usuarioId}:${m.rolGrupo}:${m.lider ? 1 : 0}`)
+    .sort()
+    .join('|')
+}
+
+function mismosIntegrantes(a, b) {
+  const idsA = new Set((a ?? []).map(m => m.usuarioId))
+  const idsB = new Set((b ?? []).map(m => m.usuarioId))
+  return idsA.size === idsB.size && [...idsA].every(id => idsB.has(id))
+}
+
 export default function StepGrupos({
   paraleloId,
   paralelos,
   hemisemestres,
+  hemisemestreInicialId,
   onParaleloSeleccionado,
   onRetroceder
 }) {
-  const [sinGrupo, setSinGrupo] = useState([])
-  const [grupos, setGrupos] = useState([])
+  const [sinGrupoPorHemi, setSinGrupoPorHemi] = useState(new Map())
+  const [gruposBase, setGruposBase] = useState([])
+  const [hemiId, setHemiId] = useState(hemisemestreInicialId ?? null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState('')
   const [modoEditar, setModoEditar] = useState(null) // grupoId del grupo en edición de tema
@@ -57,6 +74,41 @@ export default function StepGrupos({
     'Sistemas Digitales',
     'Plataformas de Hardware'
   ].includes(paraleloActual?.materiaNombre)
+
+  // Hemisemestre en edición y el otro (para "aplicar también en…").
+  const hemiActual =
+    hemisemestres.find(h => h.id === hemiId) ?? hemisemestres[0] ?? null
+  const otroHemi = hemisemestres.find(h => h.id !== hemiActual?.id) ?? null
+  const claveHemisemestres = hemisemestres.map(h => h.id).join(',')
+
+  const sinGrupo = sinGrupoPorHemi.get(hemiActual?.id) ?? []
+  const sinGrupoOtroHemi = otroHemi
+    ? (sinGrupoPorHemi.get(otroHemi.id) ?? [])
+    : []
+
+  // Vista del hemisemestre activo: `miembros` es la membresía de ese hemi.
+  const grupos = useMemo(
+    () =>
+      gruposBase.map(g => {
+        const miembros = g.miembrosPorHemi?.[hemiActual?.id] ?? []
+        const miembrosOtroHemi = otroHemi
+          ? (g.miembrosPorHemi?.[otroHemi.id] ?? [])
+          : null
+        return {
+          ...g,
+          miembros,
+          miembrosOtroHemi,
+          sincronizado:
+            !otroHemi ||
+            firmaMiembros(miembros) === firmaMiembros(miembrosOtroHemi)
+        }
+      }),
+    [gruposBase, hemiActual?.id, otroHemi?.id]
+  )
+
+  function hemisDestino(aplicarAmbos) {
+    return aplicarAmbos && otroHemi ? [hemiActual, otroHemi] : [hemiActual]
+  }
 
   const siguienteNumero = useMemo(() => {
     if (grupos.length === 0) return 1
@@ -88,7 +140,18 @@ export default function StepGrupos({
 
   useEffect(() => {
     cargar()
-  }, [paraleloId])
+  }, [paraleloId, claveHemisemestres])
+
+  // Si cambia el paralelo, conserva el hemi elegido solo si sigue existiendo.
+  useEffect(() => {
+    if (!hemisemestres.some(h => h.id === hemiId)) {
+      setHemiId(
+        hemisemestres.find(h => h.id === hemisemestreInicialId)?.id ??
+          hemisemestres[0]?.id ??
+          null
+      )
+    }
+  }, [claveHemisemestres])
 
   useEffect(() => {
     if (!modoEdicion) {
@@ -98,6 +161,13 @@ export default function StepGrupos({
       setModoAgregar(null)
     }
   }, [modoEdicion])
+
+  // Los paneles abiertos corresponden a un hemisemestre concreto.
+  useEffect(() => {
+    setModoEditarRoles(null)
+    setModoMover(null)
+    setModoAgregar(null)
+  }, [hemiActual?.id])
 
   useRealtimeRefresh({
     subscriptions: realtimeSubscriptions,
@@ -128,7 +198,7 @@ export default function StepGrupos({
     setError('')
     try {
       const [sg, gs] = await Promise.all([
-        obtenerEstudiantesSinGrupo(paraleloId),
+        obtenerEstudiantesSinGrupo(paraleloId, hemisemestres),
         obtenerGruposBase(paraleloId)
       ])
       if (version !== cargarVersionRef.current) return
@@ -144,14 +214,26 @@ export default function StepGrupos({
         (a, b) => a.numero - b.numero
       )
 
-      // Garantizar consistencia: ningún estudiante asignado a un grupo debe aparecer en sinGrupo
-      const idsConGrupo = new Set(
-        gruposFinales.flatMap(g => (g.miembros ?? []).map(m => m.usuarioId))
+      // Garantizar consistencia: ningún estudiante asignado a un grupo en un
+      // hemisemestre debe aparecer como sin grupo en ese hemisemestre.
+      const sinGrupoFinal = new Map(
+        hemisemestres.map(h => {
+          const idsConGrupo = new Set(
+            gruposFinales.flatMap(g =>
+              (g.miembrosPorHemi?.[h.id] ?? []).map(m => m.usuarioId)
+            )
+          )
+          return [
+            h.id,
+            (sg.get(h.id) ?? []).filter(
+              est => !idsConGrupo.has(est.usuarioId)
+            )
+          ]
+        })
       )
-      const sinGrupoFinal = sg.filter(est => !idsConGrupo.has(est.usuarioId))
 
-      setSinGrupo(sinGrupoFinal)
-      setGrupos(gruposFinales)
+      setSinGrupoPorHemi(sinGrupoFinal)
+      setGruposBase(gruposFinales)
     } catch (e) {
       if (version === cargarVersionRef.current) {
         setError(e.message)
@@ -191,6 +273,13 @@ export default function StepGrupos({
               onChange={seleccionarParalelo}
             />
           </div>
+          {hemisemestres.length > 1 && (
+            <SelectorHemisemestre
+              hemisemestres={hemisemestres}
+              value={hemiActual?.id}
+              onChange={setHemiId}
+            />
+          )}
           <Button
             size="sm"
             variant="outline"
@@ -216,16 +305,27 @@ export default function StepGrupos({
         </Aviso>
       )}
 
+      {otroHemi && grupos.length > 0 && (
+        <Aviso dismissible>
+          Estás viendo los grupos del {hemiActual?.nombre?.toLowerCase()}. Al crearse, los
+          grupos y roles son iguales en ambos hemisemestres; los cambios que
+          hagas aquí se aplican solo a {etiquetaHemisemestre(hemiActual)}, salvo
+          que marques «Aplicar también en {etiquetaHemisemestre(otroHemi)}».
+        </Aviso>
+      )}
+
       {sinGrupo.length === 0 && grupos.length > 0 && (
         <Aviso variant="green">
-          Todos los estudiantes matriculados están asignados a un grupo.
+          Todos los estudiantes matriculados están asignados a un grupo en{' '}
+          {etiquetaHemisemestre(hemiActual)}.
         </Aviso>
       )}
       {sinGrupo.length > 0 && grupos.length > 0 && (
         <Aviso variant="amber">
           Hay {sinGrupo.length} estudiante
           {sinGrupo.length === 1 ? '' : 's'} matriculado
-          {sinGrupo.length === 1 ? '' : 's'} sin grupo. Debe
+          {sinGrupo.length === 1 ? '' : 's'} sin grupo en{' '}
+          {etiquetaHemisemestre(hemiActual)}. Debe
           {sinGrupo.length === 1 ? '' : 'n'} ingresar a un grupo antes de
           finalizar la asignación.
         </Aviso>
@@ -235,6 +335,9 @@ export default function StepGrupos({
       {!catalogoFijo && sinGrupo.length > 0 && (
         <BuilderNuevoGrupo
           sinGrupo={sinGrupo}
+          sinGrupoOtroHemi={sinGrupoOtroHemi}
+          hemiActual={hemiActual}
+          otroHemi={otroHemi}
           siguienteNumero={siguienteNumero}
           paraleloId={paraleloId}
           hemisemestres={hemisemestres}
@@ -257,7 +360,15 @@ export default function StepGrupos({
         <div>
           <div className="sticky top-[2.5rem] md:top-0 z-30 -mx-5 px-5 py-3 mb-3 border-b border-black/[0.08] dark:border-white/10 bg-[#f8fafd]/95 dark:bg-slate-900/95 backdrop-blur-sm sm:-mx-10 sm:px-10">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <h3>Grupos creados</h3>
+              <h3>
+                Grupos creados
+                {otroHemi && (
+                  <span className="text-ink-soft font-normal">
+                    {' '}
+                    · {etiquetaHemisemestre(hemiActual)}
+                  </span>
+                )}
+              </h3>
               <label className="inline-flex items-center gap-2 self-start sm:self-auto cursor-pointer text-sm font-semibold text-ink-mid">
                 <input
                   type="checkbox"
@@ -276,7 +387,10 @@ export default function StepGrupos({
                 grupo={g}
                 grupos={grupos}
                 estudiantesDisponibles={sinGrupo}
+                estudiantesDisponiblesOtroHemi={sinGrupoOtroHemi}
                 hemisemestres={hemisemestres}
+                hemiActual={hemiActual}
+                otroHemi={otroHemi}
                 modoEditar={modoEditar === g.id}
                 modoEditarRoles={modoEditarRoles === g.id}
                 modoAgregar={modoAgregar === g.id}
@@ -302,13 +416,14 @@ export default function StepGrupos({
                     operacionEnProgresoRef.current = false
                   }
                 }}
-                onAgregar={async (usuarioId, rolGrupo) => {
+                onAgregar={async (usuarioId, rolGrupo, aplicarAmbos) => {
                   operacionEnProgresoRef.current = true
                   try {
                     await agregarIntegranteGrupo({
                       grupoId: g.id,
                       usuarioId,
-                      rolGrupo
+                      rolGrupo,
+                      hemisemestres: hemisDestino(aplicarAmbos)
                     })
                     setModoAgregar(null)
                     await cargar(true)
@@ -327,7 +442,8 @@ export default function StepGrupos({
                   grupoDestinoId,
                   rolGrupo,
                   nuevoLiderOrigenId,
-                  nuevoEvaluadorOrigenId
+                  nuevoEvaluadorOrigenId,
+                  aplicarAmbos
                 ) => {
                   operacionEnProgresoRef.current = true
                   try {
@@ -337,7 +453,8 @@ export default function StepGrupos({
                       grupoDestinoId,
                       rolGrupo,
                       nuevoLiderOrigenId,
-                      nuevoEvaluadorOrigenId
+                      nuevoEvaluadorOrigenId,
+                      hemisemestres: hemisDestino(aplicarAmbos)
                     })
                     setModoMover(null)
                     await cargar(true)
@@ -370,12 +487,68 @@ export default function StepGrupos({
   )
 }
 
+function SelectorHemisemestre({ hemisemestres, value, onChange }) {
+  return (
+    <Campo label="Hemisemestre en edición">
+      <div className="inline-flex gap-1 bg-surface rounded-sm p-0.5 border border-black/10 dark:border-white/10">
+        {hemisemestres.map(h => (
+          <button
+            key={h.id}
+            type="button"
+            onClick={() => onChange(h.id)}
+            aria-pressed={value === h.id}
+            className={`text-xs font-semibold px-3 py-1.5 rounded-[4px] transition-colors ${
+              value === h.id
+                ? 'bg-gold text-white'
+                : 'text-ink-soft hover:text-ink-mid'
+            }`}
+          >
+            {etiquetaHemisemestre(h)}
+          </button>
+        ))}
+      </div>
+    </Campo>
+  )
+}
+
+// Casilla "Aplicar también en Hemi N". Si la operación no puede replicarse
+// en el otro hemisemestre, se muestra deshabilitada con el motivo.
+function CheckOtroHemi({ otroHemi, checked, onChange, disponible, motivo }) {
+  if (!otroHemi) return null
+  return (
+    <div className="mt-3">
+      <label
+        className={`inline-flex items-center gap-2 text-xs font-semibold ${
+          disponible
+            ? 'text-ink-mid cursor-pointer'
+            : 'text-ink-soft opacity-70 cursor-not-allowed'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={disponible && checked}
+          disabled={!disponible}
+          onChange={e => onChange(e.target.checked)}
+          className="w-3.5 h-3.5 accent-gold"
+        />
+        Aplicar también en {etiquetaHemisemestre(otroHemi)}
+      </label>
+      {!disponible && motivo && (
+        <p className="text-xs text-ink-soft mt-1">{motivo}</p>
+      )}
+    </div>
+  )
+}
+
 // ---- Tarjeta de grupo existente (editar tema / mover integrante) ----
 function TarjetaGrupo({
   grupo,
   grupos,
   estudiantesDisponibles,
+  estudiantesDisponiblesOtroHemi,
   hemisemestres,
+  hemiActual,
+  otroHemi,
   modoEditar,
   modoEditarRoles,
   modoMover,
@@ -411,6 +584,11 @@ function TarjetaGrupo({
   const [errorAgregar, setErrorAgregar] = useState('')
   const [confirmandoDeshacer, setConfirmandoDeshacer] = useState(false)
   const [guardandoDeshacer, setGuardandoDeshacer] = useState(false)
+  // "Aplicar también en el otro hemi": por defecto activo si el grupo
+  // sigue siendo igual en ambos hemisemestres.
+  const [rolesAmbos, setRolesAmbos] = useState(grupo.sincronizado)
+  const [agregarAmbos, setAgregarAmbos] = useState(grupo.sincronizado)
+  const [moverAmbos, setMoverAmbos] = useState(grupo.sincronizado)
 
   // Para el diálogo de mover
   const [grupoDestino, setGrupoDestino] = useState('')
@@ -425,6 +603,7 @@ function TarjetaGrupo({
     setNuevoLiderOrigenId('')
     setNuevoEvaluadorOrigenId('')
     setErrorMovimiento('')
+    setMoverAmbos(grupo.sincronizado)
   }, [modoMover?.usuarioId])
 
   useEffect(() => {
@@ -432,6 +611,7 @@ function TarjetaGrupo({
       setEstudianteAgregar('')
       setRolAgregar('expositor')
       setErrorAgregar('')
+      setAgregarAmbos(grupo.sincronizado)
     }
   }, [modoAgregar])
 
@@ -449,13 +629,50 @@ function TarjetaGrupo({
     }
   }, [modoEditarRoles, grupo.miembros])
 
+  useEffect(() => {
+    if (modoEditarRoles) setRolesAmbos(grupo.sincronizado)
+  }, [modoEditarRoles])
+
+  const nombreHemiActual = etiquetaHemisemestre(hemiActual)
+  const nombreOtroHemi = otroHemi ? etiquetaHemisemestre(otroHemi) : ''
+
+  // Roles: replicables solo si los integrantes son los mismos en ambos hemis.
+  const rolesReplicables =
+    Boolean(otroHemi) &&
+    mismosIntegrantes(grupo.miembros, grupo.miembrosOtroHemi)
+  const aplicarRolesAmbos = rolesReplicables && rolesAmbos
+
+  // Añadir: replicable si el estudiante tampoco tiene grupo en el otro hemi.
+  const agregarReplicable =
+    Boolean(otroHemi) &&
+    (!estudianteAgregar ||
+      estudiantesDisponiblesOtroHemi.some(
+        e => e.usuarioId === estudianteAgregar
+      ))
+  const aplicarAgregarAmbos =
+    agregarReplicable && agregarAmbos && Boolean(estudianteAgregar)
+
+  // Mover: replicable si el estudiante está en este mismo grupo en el otro hemi.
   const miembroMover = grupo.miembros.find(
     m => m.usuarioId === modoMover?.usuarioId
   )
-  const requiereNuevoLider = miembroMover?.lider === true
-  const mueveEvaluador = miembroMover?.rolGrupo === 'evaluador'
+  const miembroMoverOtroHemi = (grupo.miembrosOtroHemi ?? []).find(
+    m => m.usuarioId === modoMover?.usuarioId
+  )
+  const moverReplicable = Boolean(otroHemi && miembroMoverOtroHemi)
+  const aplicarMoverAmbos = moverReplicable && moverAmbos
+  const requiereNuevoLider =
+    miembroMover?.lider === true ||
+    (aplicarMoverAmbos && miembroMoverOtroHemi?.lider === true)
+  const mueveEvaluador =
+    miembroMover?.rolGrupo === 'evaluador' ||
+    (aplicarMoverAmbos && miembroMoverOtroHemi?.rolGrupo === 'evaluador')
+  // Si se aplica en ambos, el reemplazo debe estar en el grupo en ambos hemis.
   const miembrosOrigenDisponibles = grupo.miembros.filter(
-    m => m.usuarioId !== modoMover?.usuarioId
+    m =>
+      m.usuarioId !== modoMover?.usuarioId &&
+      (!aplicarMoverAmbos ||
+        (grupo.miembrosOtroHemi ?? []).some(o => o.usuarioId === m.usuarioId))
   )
 
   async function handleGuardarTemas() {
@@ -485,6 +702,7 @@ function TarjetaGrupo({
     try {
       await actualizarRolesGrupo(
         grupo.id,
+        aplicarRolesAmbos ? [hemiActual, otroHemi] : [hemiActual],
         grupo.miembros.map(m => ({
           usuarioId: m.usuarioId,
           rolGrupo: roles[m.usuarioId]?.rolGrupo ?? m.rolGrupo,
@@ -493,7 +711,11 @@ function TarjetaGrupo({
       )
       onCerrarEditarRoles()
       onTemaGuardado()
-      notificar.exito('Roles del grupo actualizados.')
+      notificar.exito(
+        aplicarRolesAmbos || !otroHemi
+          ? 'Roles del grupo actualizados.'
+          : `Roles del grupo actualizados solo en ${nombreHemiActual}.`
+      )
     } catch (e) {
       setErrorRoles(e.message)
       notificar.error(e)
@@ -512,7 +734,7 @@ function TarjetaGrupo({
     setGuardandoAgregar(true)
     setErrorAgregar('')
     try {
-      await onAgregar(estudianteAgregar, rolAgregar)
+      await onAgregar(estudianteAgregar, rolAgregar, aplicarAgregarAmbos)
     } catch (e) {
       setErrorAgregar(e.message)
       notificar.error(e)
@@ -538,13 +760,31 @@ function TarjetaGrupo({
   const grupoDestinoSeleccionado = gruposDestino.find(
     g => g.id === grupoDestino
   )
-  const evaluadoresDestino =
-    (grupoDestinoSeleccionado?.miembros ?? []).filter(
-      m => m.rolGrupo === 'evaluador'
-    ).length + (rolDestino === 'evaluador' ? 1 : 0)
-  const lideresDestino = (grupoDestinoSeleccionado?.miembros ?? []).filter(
-    m => m.lider
-  ).length
+  // Validación del destino en cada hemisemestre afectado.
+  const miembrosDestinoPorHemi = grupoDestinoSeleccionado
+    ? [
+        { etiqueta: nombreHemiActual, miembros: grupoDestinoSeleccionado.miembros },
+        ...(aplicarMoverAmbos
+          ? [
+              {
+                etiqueta: nombreOtroHemi,
+                miembros: grupoDestinoSeleccionado.miembrosOtroHemi ?? []
+              }
+            ]
+          : [])
+      ]
+    : []
+  const destinoConVariosEvaluadores = miembrosDestinoPorHemi.find(
+    d =>
+      d.miembros.filter(m => m.rolGrupo === 'evaluador').length +
+        (rolDestino === 'evaluador' ? 1 : 0) >
+      1
+  )
+  const destinoSinLiderUnico = miembrosDestinoPorHemi.find(
+    d => d.miembros.filter(m => m.lider).length !== 1
+  )
+  const sufijoDestino = d =>
+    aplicarMoverAmbos && d ? ` (${d.etiqueta})` : ''
 
   function confirmarMovimiento() {
     if (!grupoDestino) {
@@ -555,12 +795,16 @@ function TarjetaGrupo({
       setErrorMovimiento('Selecciona el nuevo líder del grupo de origen.')
       return
     }
-    if (lideresDestino !== 1) {
-      setErrorMovimiento('El grupo destino debe tener exactamente un líder.')
+    if (destinoSinLiderUnico) {
+      setErrorMovimiento(
+        `El grupo destino debe tener exactamente un líder${sufijoDestino(destinoSinLiderUnico)}.`
+      )
       return
     }
-    if (evaluadoresDestino > 1) {
-      setErrorMovimiento('El grupo destino solo puede tener un evaluador.')
+    if (destinoConVariosEvaluadores) {
+      setErrorMovimiento(
+        `El grupo destino solo puede tener un evaluador${sufijoDestino(destinoConVariosEvaluadores)}.`
+      )
       return
     }
 
@@ -569,16 +813,27 @@ function TarjetaGrupo({
       grupoDestino,
       rolDestino,
       nuevoLiderOrigenId,
-      nuevoEvaluadorOrigenId
+      nuevoEvaluadorOrigenId,
+      aplicarMoverAmbos
     )
   }
 
   return (
     <div className="bg-white dark:bg-slate-800 border border-black/[0.11] dark:border-white/10 rounded-DEFAULT shadow-card p-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
-        <p className="text-xs font-bold text-sice-green dark:text-emerald-300">
-          Grupo {grupo.numero}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs font-bold text-sice-green dark:text-emerald-300">
+            Grupo {grupo.numero}
+          </p>
+          {otroHemi && !grupo.sincronizado && (
+            <span
+              className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-sice-amber-soft text-sice-amber dark:text-amber-200"
+              title={`Integrantes, roles o líder difieren entre ${nombreHemiActual} y ${nombreOtroHemi}`}
+            >
+              Distinto en {nombreOtroHemi}
+            </span>
+          )}
+        </div>
         <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
           {modoEdicion && estudiantesDisponibles.length > 0 && (
             <Button
@@ -634,8 +889,9 @@ function TarjetaGrupo({
             ¿Deshacer el Grupo {grupo.numero}?
           </p>
           <p className="text-xs text-ink-mid leading-relaxed">
-            Sus estudiantes volverán a la lista de estudiantes sin grupo y se
-            eliminarán sus temas, calificaciones y coevaluaciones asociadas.
+            El grupo se elimina en todos los hemisemestres. Sus estudiantes
+            volverán a la lista de estudiantes sin grupo y se eliminarán sus
+            temas, calificaciones y coevaluaciones asociadas.
           </p>
           <div className="flex gap-2 mt-3 justify-end">
             <Button
@@ -669,7 +925,7 @@ function TarjetaGrupo({
       {modoAgregar && (
         <div className="mb-4 p-3 bg-gold-soft rounded-sm border border-gold/40">
           <p className="text-xs font-semibold text-ink-mid mb-3">
-            Añadir estudiante al grupo
+            Añadir estudiante al grupo en {nombreHemiActual}
           </p>
           {errorAgregar && <Aviso variant="red">{errorAgregar}</Aviso>}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
@@ -728,6 +984,13 @@ function TarjetaGrupo({
               </Button>
             </div>
           </div>
+          <CheckOtroHemi
+            otroHemi={otroHemi}
+            checked={agregarAmbos}
+            onChange={setAgregarAmbos}
+            disponible={agregarReplicable}
+            motivo={`El estudiante ya tiene grupo en ${nombreOtroHemi}; solo se añadirá en ${nombreHemiActual}.`}
+          />
         </div>
       )}
 
@@ -777,7 +1040,7 @@ function TarjetaGrupo({
       {modoEditarRoles && (
         <div className="mb-4 p-3 bg-surface rounded-sm border border-black/10">
           <p className="text-xs font-semibold text-ink-mid mb-3">
-            Roles y líder del grupo
+            Roles y líder del grupo en {nombreHemiActual}
           </p>
           {errorRoles && <Aviso variant="red">{errorRoles}</Aviso>}
           <div className="flex flex-col gap-1.5">
@@ -831,6 +1094,13 @@ function TarjetaGrupo({
               </div>
             ))}
           </div>
+          <CheckOtroHemi
+            otroHemi={otroHemi}
+            checked={rolesAmbos}
+            onChange={setRolesAmbos}
+            disponible={rolesReplicables}
+            motivo={`Los integrantes del grupo son distintos en ${nombreOtroHemi}; los roles solo se cambiarán en ${nombreHemiActual}.`}
+          />
           <div className="flex gap-2 mt-3 justify-end">
             <Button size="sm" variant="outline" onClick={onCerrarEditarRoles}>
               Cancelar
@@ -879,7 +1149,8 @@ function TarjetaGrupo({
       {modoMover && (
         <div className="mt-3 p-3 bg-surface rounded-sm border border-black/10">
           <p className="text-xs font-semibold text-ink-mid mb-3">
-            Mover <strong>{miembroMover?.nombre}</strong> a otro grupo
+            Mover <strong>{miembroMover?.nombre}</strong> a otro grupo en{' '}
+            {nombreHemiActual}
           </p>
           {errorMovimiento && <Aviso variant="red">{errorMovimiento}</Aviso>}
           <div className="flex flex-col gap-3">
@@ -963,12 +1234,25 @@ function TarjetaGrupo({
                 </p>
               </div>
             )}
-            {grupoDestino && evaluadoresDestino > 1 && (
+            {grupoDestino && destinoConVariosEvaluadores && (
               <p className="text-xs text-red-700">
-                El grupo destino solo puede tener un evaluador.
+                El grupo destino solo puede tener un evaluador
+                {sufijoDestino(destinoConVariosEvaluadores)}.
               </p>
             )}
           </div>
+          <CheckOtroHemi
+            otroHemi={otroHemi}
+            checked={moverAmbos}
+            onChange={valor => {
+              setMoverAmbos(valor)
+              setNuevoLiderOrigenId('')
+              setNuevoEvaluadorOrigenId('')
+              setErrorMovimiento('')
+            }}
+            disponible={moverReplicable}
+            motivo={`En ${nombreOtroHemi} el estudiante pertenece a otro grupo; solo se moverá en ${nombreHemiActual}.`}
+          />
           <div className="flex gap-2 mt-3 justify-end">
             <Button size="sm" variant="outline" onClick={onCancelarMover}>
               Cancelar

@@ -3,6 +3,7 @@ import { useOutletContext } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext.jsx'
 import {
   asignarEstudianteGrupo,
+  etiquetaHemisemestre,
   obtenerGruposConDetalle
 } from '../../lib/data.js'
 import {
@@ -18,13 +19,31 @@ import TarjetaAsignacionGrupo from '../../components/estudiante/TarjetaAsignacio
 
 export default function MiGrupo() {
   const { perfil } = useAuth()
-  const { contexto, hemisemestreActivo } = useOutletContext()
+  const { contexto, hemisemestreActivo, hemisemestres, recargarContexto } =
+    useOutletContext()
   const [grupos, setGrupos] = useState([])
   const [cargando, setCargando] = useState(true)
   const [grupoGuardandoId, setGrupoGuardandoId] = useState(null)
   const [error, setError] = useState('')
   const [exito, setExito] = useState('')
   const [borradores, setBorradores] = useState({})
+
+  // Por defecto la elección se aplica en ambos hemisemestres, salvo que el
+  // estudiante ya tenga asignaciones distintas en cada uno.
+  const otroHemi = (hemisemestres ?? []).find(
+    h => h.id !== hemisemestreActivo?.id
+  )
+  const membresiaOtroHemi = otroHemi
+    ? contexto?.membresias?.[otroHemi.id]
+    : null
+  const asignacionCompartida = mismaMembresia(
+    contexto?.membresias?.[hemisemestreActivo?.id],
+    membresiaOtroHemi
+  )
+  const [aplicarAmbos, setAplicarAmbos] = useState(asignacionCompartida)
+  useEffect(() => {
+    setAplicarAmbos(asignacionCompartida)
+  }, [hemisemestreActivo?.id, asignacionCompartida])
 
   const realtimeSubscriptions = useMemo(
     () => [
@@ -107,9 +126,11 @@ export default function MiGrupo() {
         paraleloId: contexto.paraleloId,
         grupoId,
         rolGrupo: borrador.rol,
-        lider: borrador.lider
+        lider: borrador.lider,
+        hemisemestreId:
+          aplicarAmbos || !otroHemi ? null : hemisemestreActivo.id
       })
-      await cargar(true)
+      await Promise.all([cargar(true), recargarContexto?.(false)])
       setExito('Tu asignación se guardó correctamente.')
       notificar.exito('Tu asignación se guardó correctamente.')
     } catch (e) {
@@ -150,7 +171,7 @@ export default function MiGrupo() {
           <h1>Asignación de grupos</h1>
           <p className="text-sm text-ink-soft mt-1">
             {abierta
-              ? 'Escoge un grupo, tu rol y si serás su líder. Puedes cambiar tu elección mientras la etapa esté abierta.'
+              ? 'Escoge un grupo, tu rol y si serás su líder. Tu grupo y rol pueden ser distintos en cada hemisemestre. Puedes cambiar tu elección mientras la etapa esté abierta.'
               : 'La etapa de asignación fue finalizada por el profesor.'}
           </p>
         </div>
@@ -194,7 +215,34 @@ export default function MiGrupo() {
               <Badge variant="pending">Líder</Badge>
             )}
           </div>
+          {otroHemi && !asignacionCompartida && (
+            <p className="text-xs text-ink-soft mt-2">
+              En {etiquetaHemisemestre(otroHemi)}:{' '}
+              {membresiaOtroHemi
+                ? `Grupo ${
+                    grupos.find(g => g.id === membresiaOtroHemi.grupoId)
+                      ?.numero ?? '—'
+                  } · ${
+                    membresiaOtroHemi.rolGrupo === 'evaluador'
+                      ? 'Evaluador'
+                      : 'Expositor'
+                  }${membresiaOtroHemi.lider ? ' · Líder' : ''}`
+                : 'sin grupo'}
+            </p>
+          )}
         </Panel>
+      )}
+
+      {abierta && otroHemi && (
+        <label className="inline-flex items-center gap-2 mb-4 cursor-pointer text-sm font-semibold text-ink-mid">
+          <input
+            type="checkbox"
+            checked={aplicarAmbos}
+            onChange={e => setAplicarAmbos(e.target.checked)}
+            className="w-4 h-4 accent-gold"
+          />
+          Aplicar mi elección también en {etiquetaHemisemestre(otroHemi)}
+        </label>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
@@ -226,4 +274,14 @@ export default function MiGrupo() {
 
 function miembroActual(grupo, usuarioId) {
   return grupo.miembros.find(m => m.usuarioId === usuarioId)
+}
+
+function mismaMembresia(a, b) {
+  if (!a && !b) return true
+  if (!a || !b) return false
+  return (
+    a.grupoId === b.grupoId &&
+    a.rolGrupo === b.rolGrupo &&
+    Boolean(a.lider) === Boolean(b.lider)
+  )
 }

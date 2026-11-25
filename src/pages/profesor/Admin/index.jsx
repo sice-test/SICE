@@ -15,6 +15,7 @@ export default function Admin() {
     contexto,
     paralelos: paralelosGlobales,
     hemisemestres: hemisemestresGlobales,
+    hemisemestreActivo,
     recargarContexto
   } = useOutletContext()
 
@@ -106,6 +107,7 @@ export default function Admin() {
           paraleloId={paraleloId}
           paralelos={paralelos}
           hemisemestres={hemisemestres}
+          hemisemestreInicialId={hemisemestreActivo?.id}
           onParaleloSeleccionado={actualizarParalelo}
           onRetroceder={retroceder}
         />

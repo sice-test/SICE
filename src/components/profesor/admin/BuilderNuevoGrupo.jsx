@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { crearGrupo } from '../../../lib/data.js'
+import { crearGrupo, etiquetaHemisemestre } from '../../../lib/data.js'
 import {
   Panel,
   Button,
@@ -11,6 +11,9 @@ import AddIcon from '@mui/icons-material/Add'
 
 export default function BuilderNuevoGrupo({
   sinGrupo,
+  sinGrupoOtroHemi = [],
+  hemiActual,
+  otroHemi,
   siguienteNumero,
   paraleloId,
   hemisemestres,
@@ -24,6 +27,14 @@ export default function BuilderNuevoGrupo({
   const [guardando, setGuardando] = useState(false)
   const [liderActual, setLiderActual] = useState(null)
   const [desplegado, setDesplegado] = useState(true)
+  // Por defecto los integrantes se crean iguales en ambos hemisemestres.
+  const [crearEnAmbos, setCrearEnAmbos] = useState(true)
+
+  const idsSinGrupoOtroHemi = new Set(sinGrupoOtroHemi.map(e => e.usuarioId))
+  const replicableEnOtroHemi =
+    Boolean(otroHemi) &&
+    [...seleccionados.keys()].every(uid => idsSinGrupoOtroHemi.has(uid))
+  const aplicarEnAmbos = replicableEnOtroHemi && crearEnAmbos
 
   useEffect(() => {
     setSeleccionados(prev => {
@@ -97,6 +108,8 @@ export default function BuilderNuevoGrupo({
           hemisemestres.map(h => [h.id, temas[h.id].trim()])
         ),
         hemisemestres,
+        hemisemestresMiembros:
+          aplicarEnAmbos || !hemiActual ? hemisemestres : [hemiActual],
         miembros
       })
       setSeleccionados(new Map())
@@ -201,6 +214,34 @@ export default function BuilderNuevoGrupo({
               ))}
             </div>
           </div>
+
+          {otroHemi && (
+            <div className="mb-5">
+              <label
+                className={`inline-flex items-center gap-2 text-sm font-semibold ${
+                  replicableEnOtroHemi
+                    ? 'text-ink-mid cursor-pointer'
+                    : 'text-ink-soft opacity-70 cursor-not-allowed'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={aplicarEnAmbos}
+                  disabled={!replicableEnOtroHemi}
+                  onChange={e => setCrearEnAmbos(e.target.checked)}
+                  className="w-4 h-4 accent-gold"
+                />
+                Mismos integrantes y roles en {etiquetaHemisemestre(otroHemi)}
+              </label>
+              {!replicableEnOtroHemi && seleccionados.size > 0 && (
+                <p className="text-xs text-ink-soft mt-1">
+                  Algún estudiante seleccionado ya tiene grupo en{' '}
+                  {etiquetaHemisemestre(otroHemi)}; los integrantes solo se
+                  asignarán en {etiquetaHemisemestre(hemiActual)}.
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="flex justify-end">
             <Button

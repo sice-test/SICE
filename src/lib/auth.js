@@ -97,7 +97,9 @@ export async function obtenerContextosProfesor(profesorId) {
   return { paralelos, contextoActivo: paralelos[0] }
 }
 
-// Contexto del estudiante: matrícula más reciente + grupo asignado.
+// Contexto del estudiante: matrícula más reciente + grupo asignado en cada
+// hemisemestre (`membresias` = { [hemisemestreId]: { grupoId, rolGrupo, lider } }).
+// El Shell combina la membresía del hemisemestre activo en grupoId/rolGrupo/lider.
 export async function obtenerContextoEstudiante(usuarioId) {
   const { data, error } = await supabase
     .from('matriculas')
@@ -111,13 +113,19 @@ export async function obtenerContextoEstudiante(usuarioId) {
   if (error) throw error
   if (!data) return null
 
-  const { data: miembro, error: errM } = await supabase
+  const { data: filasMiembro, error: errM } = await supabase
     .from('grupo_miembros')
-    .select('grupo_id, rol_grupo, lider, grupos!inner(paralelo_id)')
+    .select('grupo_id, rol_grupo, lider, hemisemestre_id, grupos!inner(paralelo_id)')
     .eq('usuario_id', usuarioId)
     .eq('grupos.paralelo_id', data.paralelo_id)
-    .maybeSingle()
   if (errM) throw errM
+
+  const membresias = Object.fromEntries(
+    (filasMiembro ?? []).map(m => [
+      m.hemisemestre_id,
+      { grupoId: m.grupo_id, rolGrupo: m.rol_grupo, lider: m.lider }
+    ])
+  )
 
   const p = data.paralelos
   return {
@@ -127,8 +135,9 @@ export async function obtenerContextoEstudiante(usuarioId) {
     periodoNombre: p?.periodos?.nombre ?? '—',
     etiqueta: `${p?.materias?.nombre ?? '—'} ${p?.codigo ?? ''} · ${p?.periodos?.nombre ?? '—'}`,
     estadoAsignacion: p?.estado_asignacion ?? 'abierta',
-    grupoId: miembro?.grupo_id ?? null,
-    rolGrupo: miembro?.rol_grupo ?? null,
-    lider: miembro?.lider ?? false
+    membresias,
+    grupoId: null,
+    rolGrupo: null,
+    lider: false
   }
 }

@@ -100,30 +100,28 @@ export default function Notas() {
     if (!silenciosa) setCargando(true)
     setError('')
     try {
-      const tipoDoc =
-        contexto.rolGrupo === 'evaluador'
-          ? 'CALIF_EVALUADOR'
-          : 'CALIF_EXPOSITOR'
-      const tipoCoev =
-        contexto.rolGrupo === 'evaluador'
-          ? 'COEVAL_EVALUADOR'
-          : 'COEVAL_EXPOSITOR'
-
-      const [rubricaDoc, rubricaCoev] = await Promise.all([
-        obtenerRubrica(tipoDoc),
-        obtenerRubrica(tipoCoev)
+      const [docExp, docEval, coevExp, coevEval] = await Promise.all([
+        obtenerRubrica('CALIF_EXPOSITOR'),
+        obtenerRubrica('CALIF_EVALUADOR'),
+        obtenerRubrica('COEVAL_EXPOSITOR'),
+        obtenerRubrica('COEVAL_EVALUADOR')
       ])
-
-      const maxDoc = puntajeMaximo(rubricaDoc)
-      const maxCoev = puntajeMaximo(rubricaCoev)
 
       const bs = await Promise.all(
         hemisemestres.map(async hs => {
+          // Grupo y rol pueden ser distintos en cada hemisemestre.
+          const membresia = contexto.membresias?.[hs.id]
+          const esEvaluador = membresia?.rolGrupo === 'evaluador'
+          const rubricaDoc = esEvaluador ? docEval : docExp
+          const rubricaCoev = esEvaluador ? coevEval : coevExp
+          const maxDoc = puntajeMaximo(rubricaDoc)
+          const maxCoev = puntajeMaximo(rubricaCoev)
+
           const [califDoc, coeval] = await Promise.all([
             obtenerCalificacionDocente(perfil.id, hs.id, rubricaDoc.id),
-            contexto.grupoId
+            membresia?.grupoId
               ? obtenerPromedioCoeval(
-                  contexto.grupoId,
+                  membresia.grupoId,
                   hs.id,
                   rubricaCoev.id,
                   perfil.id

@@ -130,43 +130,64 @@ create table public.grupo_temas (
   unique (grupo_id, hemisemestre_id)
 );
 
+-- Membresía por hemisemestre: una fila por estudiante y hemisemestre.
+-- Por defecto se crea igual en ambos hemisemestres, pero grupo, rol y
+-- líder pueden modificarse en uno sin afectar al otro.
 create table public.grupo_miembros (
-  id         uuid primary key default gen_random_uuid(),
-  grupo_id   uuid not null references public.grupos(id)   on delete cascade,
-  usuario_id uuid not null references public.usuarios(id) on delete cascade,
-  rol_grupo  text not null check (rol_grupo in ('expositor', 'evaluador')),
-  -- "lider" reemplaza a "coordinador"; hay uno por grupo
-  lider      boolean not null default false,
-  unique (grupo_id, usuario_id)
+  id              uuid primary key default gen_random_uuid(),
+  grupo_id        uuid not null references public.grupos(id)        on delete cascade,
+  usuario_id      uuid not null references public.usuarios(id)      on delete cascade,
+  hemisemestre_id uuid not null references public.hemisemestres(id) on delete cascade,
+  rol_grupo       text not null check (rol_grupo in ('expositor', 'evaluador')),
+  -- "lider" reemplaza a "coordinador"; hay uno por grupo y hemisemestre
+  lider           boolean not null default false,
+  constraint grupo_miembros_usuario_hemisemestre_key
+    unique (usuario_id, hemisemestre_id)
 );
+
+create index grupo_miembros_grupo_hemisemestre_idx
+  on public.grupo_miembros (grupo_id, hemisemestre_id);
 
 create or replace function public.validar_un_grupo_por_paralelo()
 returns trigger
 language plpgsql
 as $$
 begin
+  if new.hemisemestre_id is null then
+    raise exception 'La membresía del grupo debe indicar el hemisemestre';
+  end if;
+
+  if not exists (
+    select 1
+      from public.grupos g
+      join public.hemisemestres h on h.paralelo_id = g.paralelo_id
+     where g.id = new.grupo_id
+       and h.id = new.hemisemestre_id
+  ) then
+    raise exception 'El hemisemestre no pertenece al paralelo del grupo';
+  end if;
+
   if exists (
     select 1
       from public.grupo_miembros gm
-      join public.grupos g on g.id = gm.grupo_id
-      join public.grupos nuevo on nuevo.id = new.grupo_id
      where gm.usuario_id = new.usuario_id
-       and g.paralelo_id = nuevo.paralelo_id
+       and gm.hemisemestre_id = new.hemisemestre_id
        and gm.id is distinct from new.id
   ) then
-    raise exception 'Un estudiante solo puede pertenecer a un grupo por paralelo';
+    raise exception 'Un estudiante solo puede pertenecer a un grupo por hemisemestre';
   end if;
   return new;
 end;
 $$;
 
 create trigger trg_un_grupo_por_paralelo
-before insert or update of grupo_id, usuario_id on public.grupo_miembros
+before insert or update of grupo_id, usuario_id, hemisemestre_id
+on public.grupo_miembros
 for each row execute function public.validar_un_grupo_por_paralelo();
 
--- Cada grupo puede tener como máximo un líder.
+-- Cada grupo puede tener como máximo un líder por hemisemestre.
 create unique index grupo_miembros_un_lider_por_grupo
-  on public.grupo_miembros (grupo_id)
+  on public.grupo_miembros (grupo_id, hemisemestre_id)
   where lider = true;
 
 -- ------------------------------------------------------------
@@ -254,6 +275,7 @@ begin
     select 1 from public.grupo_miembros gm
     where gm.usuario_id = new.evaluador_id
       and gm.grupo_id   = new.grupo_evaluado_id
+      and gm.hemisemestre_id = new.hemisemestre_id
   ) then
     raise exception 'Un estudiante no puede coevaluar a su propio grupo';
   end if;
@@ -261,6 +283,7 @@ begin
     select 1 from public.grupo_miembros gm
     where gm.usuario_id = new.estudiante_evaluado_id
       and gm.grupo_id = new.grupo_evaluado_id
+      and gm.hemisemestre_id = new.hemisemestre_id
   ) then
     raise exception 'El estudiante evaluado no pertenece al grupo';
   end if;
@@ -385,13 +408,16 @@ for each row execute function public.inicializar_paralelo();
 
 -- Creación de grupos de forma atomica: bloquea el paralelo y reserva el
 -- siguiente numero antes de insertar grupo, temas y miembros.
+-- Los integrantes se insertan en cada hemisemestre de p_hemisemestres_miembros
+-- (por defecto, en todos los de p_hemisemestres).
 create or replace function public.crear_grupo_admin(
   p_paralelo_id uuid,
   p_numero integer,
   p_max_integrantes integer,
   p_temas jsonb,
   p_hemisemestres jsonb,
-  p_miembros jsonb
+  p_miembros jsonb,
+  p_hemisemestres_miembros jsonb default null
 )
 returns jsonb
 language plpgsql
@@ -404,6 +430,8 @@ declare
   v_miembro jsonb;
   v_lideres integer;
   v_hemisemestre jsonb;
+  v_hemi_id uuid;
+  v_hemis_miembros integer := 0;
 begin
   if auth.uid() is null then
     raise exception 'Sesión requerida';
@@ -451,23 +479,45 @@ begin
        and h.paralelo_id = p_paralelo_id;
   end loop;
 
-  for v_miembro in
+  for v_hemisemestre in
     select value
-      from jsonb_array_elements(coalesce(p_miembros, '[]'::jsonb))
+      from jsonb_array_elements(
+        coalesce(p_hemisemestres_miembros, p_hemisemestres, '[]'::jsonb)
+      )
   loop
-    insert into public.grupo_miembros (
-      grupo_id,
-      usuario_id,
-      rol_grupo,
-      lider
-    )
-    values (
-      v_grupo_id,
-      (v_miembro->>'usuarioId')::uuid,
-      v_miembro->>'rolGrupo',
-      coalesce((v_miembro->>'lider')::boolean, false)
-    );
+    v_hemi_id := (v_hemisemestre->>'id')::uuid;
+    if not exists (
+      select 1 from public.hemisemestres
+       where id = v_hemi_id and paralelo_id = p_paralelo_id
+    ) then
+      raise exception 'El hemisemestre no pertenece al paralelo';
+    end if;
+    v_hemis_miembros := v_hemis_miembros + 1;
+
+    for v_miembro in
+      select value
+        from jsonb_array_elements(coalesce(p_miembros, '[]'::jsonb))
+    loop
+      insert into public.grupo_miembros (
+        grupo_id,
+        usuario_id,
+        hemisemestre_id,
+        rol_grupo,
+        lider
+      )
+      values (
+        v_grupo_id,
+        (v_miembro->>'usuarioId')::uuid,
+        v_hemi_id,
+        v_miembro->>'rolGrupo',
+        coalesce((v_miembro->>'lider')::boolean, false)
+      );
+    end loop;
   end loop;
+
+  if v_hemis_miembros = 0 then
+    raise exception 'Indica al menos un hemisemestre para los integrantes';
+  end if;
 
   return jsonb_build_object(
     'id', v_grupo_id,
@@ -477,10 +527,10 @@ end;
 $$;
 
 revoke all on function public.crear_grupo_admin(
-  uuid, integer, integer, jsonb, jsonb, jsonb
+  uuid, integer, integer, jsonb, jsonb, jsonb, jsonb
 ) from public;
 grant execute on function public.crear_grupo_admin(
-  uuid, integer, integer, jsonb, jsonb, jsonb
+  uuid, integer, integer, jsonb, jsonb, jsonb, jsonb
 ) to authenticated;
 
 -- Operaciones de asignación ejecutadas de forma atómica. El estudiante solo
@@ -489,7 +539,8 @@ create or replace function public.asignar_estudiante_grupo(
   p_paralelo_id uuid,
   p_grupo_id uuid,
   p_rol_grupo text,
-  p_lider boolean default false
+  p_lider boolean default false,
+  p_hemisemestre_id uuid default null
 ) returns void
 language plpgsql
 security definer
@@ -497,8 +548,9 @@ set search_path = public
 as $$
 declare
   grupo_paralelo_id uuid;
-  miembro_actual public.grupo_miembros%rowtype;
   evaluadores_destino integer;
+  v_hemi record;
+  v_sufijo text;
 begin
   if auth.uid() is null then raise exception 'Sesión requerida'; end if;
   if p_rol_grupo not in ('expositor', 'evaluador') then
@@ -522,32 +574,49 @@ begin
   ) then
     raise exception 'La etapa de asignación está finalizada';
   end if;
-
-  select gm.* into miembro_actual
-    from public.grupo_miembros gm
-    join public.grupos g on g.id = gm.grupo_id
-   where gm.usuario_id = auth.uid()
-     and g.paralelo_id = p_paralelo_id
-   for update;
-
-  if miembro_actual.grupo_id is not null then
-    delete from public.grupo_miembros where id = miembro_actual.id;
+  if p_hemisemestre_id is not null and not exists (
+    select 1 from public.hemisemestres
+     where id = p_hemisemestre_id and paralelo_id = p_paralelo_id
+  ) then
+    raise exception 'El hemisemestre no pertenece al paralelo';
   end if;
 
-  select count(*) into evaluadores_destino
-    from public.grupo_miembros
-   where grupo_id = p_grupo_id and rol_grupo = 'evaluador';
-  if p_rol_grupo = 'evaluador' and evaluadores_destino > 0 then
-    raise exception 'Cada grupo puede tener un solo evaluador';
-  end if;
+  for v_hemi in
+    select h.id, h.nombre
+      from public.hemisemestres h
+     where h.paralelo_id = p_paralelo_id
+       and (p_hemisemestre_id is null or h.id = p_hemisemestre_id)
+     order by h.orden
+  loop
+    v_sufijo := case
+      when p_hemisemestre_id is null then ' (' || v_hemi.nombre || ')'
+      else ''
+    end;
 
-  if p_lider then
-    update public.grupo_miembros set lider = false
-     where grupo_id = p_grupo_id;
-  end if;
+    delete from public.grupo_miembros
+     where usuario_id = auth.uid()
+       and hemisemestre_id = v_hemi.id;
 
-  insert into public.grupo_miembros (grupo_id, usuario_id, rol_grupo, lider)
-  values (p_grupo_id, auth.uid(), p_rol_grupo, p_lider);
+    select count(*) into evaluadores_destino
+      from public.grupo_miembros
+     where grupo_id = p_grupo_id
+       and hemisemestre_id = v_hemi.id
+       and rol_grupo = 'evaluador';
+    if p_rol_grupo = 'evaluador' and evaluadores_destino > 0 then
+      raise exception 'Cada grupo puede tener un solo evaluador%', v_sufijo;
+    end if;
+
+    if p_lider then
+      update public.grupo_miembros set lider = false
+       where grupo_id = p_grupo_id
+         and hemisemestre_id = v_hemi.id;
+    end if;
+
+    insert into public.grupo_miembros (
+      grupo_id, usuario_id, hemisemestre_id, rol_grupo, lider
+    )
+    values (p_grupo_id, auth.uid(), v_hemi.id, p_rol_grupo, p_lider);
+  end loop;
 end;
 $$;
 
@@ -564,6 +633,7 @@ declare
   asignados integer;
   sin_grupo integer;
   grupo record;
+  v_hemi record;
 begin
   if not public.puede_gestionar_paralelo(p_paralelo_id) then
     raise exception 'No autorizado';
@@ -575,30 +645,48 @@ begin
     raise exception 'El paralelo debe tener exactamente siete grupos';
   end if;
 
-  select count(*) into grupos_sin_integrantes
-    from public.grupos g
-   where g.paralelo_id = p_paralelo_id
-     and not exists (select 1 from public.grupo_miembros gm where gm.grupo_id = g.id);
-  if grupos_sin_integrantes > 0 then
-    raise exception 'Todos los grupos deben tener al menos un integrante';
-  end if;
+  select count(*) into matriculados
+    from public.matriculas where paralelo_id = p_paralelo_id;
 
-  select count(*) into matriculados from public.matriculas where paralelo_id = p_paralelo_id;
-  select count(distinct gm.usuario_id) into asignados
-    from public.grupo_miembros gm
-    join public.grupos g on g.id = gm.grupo_id
-   where g.paralelo_id = p_paralelo_id;
-  sin_grupo := matriculados - asignados;
-  if sin_grupo > 0 then
-    raise exception 'Hay % estudiante(s) matriculado(s) sin grupo. Revisa el paso Estudiantes y la asignación de grupos', sin_grupo;
-  elsif sin_grupo < 0 then
-    raise exception 'Hay % integrante(s) en grupos que no están matriculados en este paralelo', abs(sin_grupo);
-  end if;
-
-  for grupo in select id, numero from public.grupos where paralelo_id = p_paralelo_id loop
-    if (select count(*) from public.grupo_miembros where grupo_id = grupo.id and lider) <> 1 then
-      raise exception 'El grupo % debe tener exactamente un líder', grupo.numero;
+  for v_hemi in
+    select id, nombre from public.hemisemestres
+     where paralelo_id = p_paralelo_id
+     order by orden
+  loop
+    select count(*) into grupos_sin_integrantes
+      from public.grupos g
+     where g.paralelo_id = p_paralelo_id
+       and not exists (
+         select 1 from public.grupo_miembros gm
+          where gm.grupo_id = g.id
+            and gm.hemisemestre_id = v_hemi.id
+       );
+    if grupos_sin_integrantes > 0 then
+      raise exception 'Todos los grupos deben tener al menos un integrante (%)', v_hemi.nombre;
     end if;
+
+    select count(distinct gm.usuario_id) into asignados
+      from public.grupo_miembros gm
+     where gm.hemisemestre_id = v_hemi.id;
+    sin_grupo := matriculados - asignados;
+    if sin_grupo > 0 then
+      raise exception 'Hay % estudiante(s) matriculado(s) sin grupo en el %. Revisa el paso Estudiantes y la asignación de grupos', sin_grupo, v_hemi.nombre;
+    elsif sin_grupo < 0 then
+      raise exception 'Hay % integrante(s) en grupos del % que no están matriculados en este paralelo', abs(sin_grupo), v_hemi.nombre;
+    end if;
+
+    for grupo in
+      select id, numero from public.grupos where paralelo_id = p_paralelo_id
+    loop
+      if (
+        select count(*) from public.grupo_miembros
+         where grupo_id = grupo.id
+           and hemisemestre_id = v_hemi.id
+           and lider
+      ) <> 1 then
+        raise exception 'El grupo % debe tener exactamente un líder en el %', grupo.numero, v_hemi.nombre;
+      end if;
+    end loop;
   end loop;
 
   update public.paralelos set estado_asignacion = 'finalizada'
@@ -621,7 +709,8 @@ begin
 end;
 $$;
 
-grant execute on function public.asignar_estudiante_grupo(uuid, uuid, text, boolean) to authenticated;
+revoke all on function public.asignar_estudiante_grupo(uuid, uuid, text, boolean, uuid) from public;
+grant execute on function public.asignar_estudiante_grupo(uuid, uuid, text, boolean, uuid) to authenticated;
 grant execute on function public.finalizar_asignacion(uuid) to authenticated;
 grant execute on function public.reabrir_asignacion(uuid) to authenticated;
 
@@ -1105,9 +1194,8 @@ begin
 
   select rol_grupo into v_rol
     from public.grupo_miembros gm
-    join public.grupos g on g.id = gm.grupo_id
    where gm.usuario_id = new.estudiante_id
-     and g.paralelo_id = v_paralelo_id
+     and gm.hemisemestre_id = new.hemisemestre_id
    limit 1;
 
   select tipo into v_tipo

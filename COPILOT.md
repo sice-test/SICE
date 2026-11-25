@@ -99,6 +99,11 @@ Si el usuario navega directamente a la URL sin estado, se muestra un error.
 - `coordinador` → `lider` en `grupo_miembros`
 - `hemisemestres` se crean automáticamente al insertar un `paralelo` (trigger)
 - `configuracion_notas` (70/30) también se crea por trigger
+- `grupo_miembros` tiene `hemisemestre_id`: grupo, rol y líder se guardan
+  por hemisemestre. Por defecto se crean iguales en ambos, pero pueden
+  modificarse por separado. En el estudiante, `contexto.membresias` guarda
+  la membresía de cada hemi y el `Shell` expone en `contexto.grupoId`,
+  `contexto.rolGrupo` y `contexto.lider` los del hemisemestre activo.
 - No existe tabla `etapas` ni columna `coordinador` — cualquier referencia a
   esos nombres es de versiones anteriores
 

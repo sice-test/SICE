@@ -118,17 +118,20 @@ export async function obtenerEstadoAsignacion(paraleloId) {
   return data.estado_asignacion
 }
 
+// hemisemestreId = null aplica la asignación en ambos hemisemestres.
 export async function asignarEstudianteGrupo({
   paraleloId,
   grupoId,
   rolGrupo,
-  lider
+  lider,
+  hemisemestreId = null
 }) {
   const { error } = await supabase.rpc('asignar_estudiante_grupo', {
     p_paralelo_id: paraleloId,
     p_grupo_id: grupoId,
     p_rol_grupo: rolGrupo,
-    p_lider: lider
+    p_lider: lider,
+    p_hemisemestre_id: hemisemestreId
   })
   if (error) throw error
 }
@@ -147,19 +150,35 @@ export async function reabrirAsignacion(paraleloId) {
   if (error) throw error
 }
 
-function validarMiembrosGrupo(miembros) {
+export function etiquetaHemisemestre(hemisemestre) {
+  return hemisemestre?.orden === 1 ? 'Hemi 1' : 'Hemi 2'
+}
+
+// Sufijo " (Hemi N)" para mensajes cuando la operación abarca varios hemis.
+function sufijoHemi(hemisemestre, varios) {
+  return varios ? ` (${etiquetaHemisemestre(hemisemestre)})` : ''
+}
+
+function validarHemisemestres(hemisemestres) {
+  if (!Array.isArray(hemisemestres) || hemisemestres.length === 0) {
+    throw new Error('Selecciona al menos un hemisemestre.')
+  }
+}
+
+function validarMiembrosGrupo(miembros, sufijo = '') {
   const cantidadLideres = miembros.filter(m => m.lider).length
   if (cantidadLideres !== 1) {
-    throw new Error('Todos los grupos deben tener un líder.')
+    throw new Error(`Todos los grupos deben tener un líder${sufijo}.`)
   }
   const cantidadEvaluadores = miembros.filter(
     m => m.rolGrupo === 'evaluador'
   ).length
   if (cantidadEvaluadores > 1) {
-    throw new Error('Cada grupo puede tener un solo evaluador.')
+    throw new Error(`Cada grupo puede tener un solo evaluador${sufijo}.`)
   }
 }
 
+// Grupos con tema y miembros de UN hemisemestre.
 export async function obtenerGruposConDetalle(paraleloId, hemisemestreId) {
   const { data, error } = await supabase
     .from('grupos')
@@ -167,11 +186,12 @@ export async function obtenerGruposConDetalle(paraleloId, hemisemestreId) {
       `
       id, numero, max_integrantes,
       grupo_temas!inner ( id, tema, hemisemestre_id, coevaluacion_habilitada ),
-      grupo_miembros ( usuario_id, rol_grupo, lider )
+      grupo_miembros ( usuario_id, rol_grupo, lider, hemisemestre_id )
     `
     )
     .eq('paralelo_id', paraleloId)
     .eq('grupo_temas.hemisemestre_id', hemisemestreId)
+    .eq('grupo_miembros.hemisemestre_id', hemisemestreId)
     .order('numero')
   if (error) throw error
 
@@ -215,23 +235,19 @@ export async function obtenerGruposConDetalle(paraleloId, hemisemestreId) {
   }))
 }
 
-// Para el builder del Admin: grupos sin tener en cuenta el hemisemestre
-// (membresía es fija; el tema es lo que varía).
-export async function obtenerGruposBase(paraleloId, grupoId = null) {
-  let query = supabase
+// Para el builder del Admin: grupos con los miembros de cada hemisemestre.
+// Devuelve `miembrosPorHemi` = { [hemisemestreId]: miembros[] }.
+export async function obtenerGruposBase(paraleloId) {
+  const { data, error } = await supabase
     .from('grupos')
     .select(
       `
       id, numero, max_integrantes,
-      grupo_miembros ( usuario_id, rol_grupo, lider )
+      grupo_miembros ( usuario_id, rol_grupo, lider, hemisemestre_id )
     `
     )
     .eq('paralelo_id', paraleloId)
     .order('numero')
-
-  if (grupoId) query = query.eq('id', grupoId)
-
-  const { data, error } = await query
   if (error) throw error
 
   const userIds = [
@@ -251,39 +267,38 @@ export async function obtenerGruposBase(paraleloId, grupoId = null) {
   const mapUsuarios = new Map((usuarios ?? []).map(u => [u.id, u]))
 
   const gruposUnicos = new Map((data ?? []).map(g => [g.id, g]))
-  return [...gruposUnicos.values()].map(g => ({
-    id: g.id,
-    numero: g.numero,
-    maxIntegrantes: g.max_integrantes,
-    miembros: [
-      ...new Map(
-        (g.grupo_miembros ?? []).map(m => [m.usuario_id, m])
-      ).values()
-    ].map(m => {
+  return [...gruposUnicos.values()].map(g => {
+    const miembrosPorHemi = {}
+    ;(g.grupo_miembros ?? []).forEach(m => {
+      const lista = (miembrosPorHemi[m.hemisemestre_id] ??= [])
+      if (lista.some(x => x.usuarioId === m.usuario_id)) return
       const usuario = mapUsuarios.get(m.usuario_id)
-      return {
+      lista.push({
         usuarioId: m.usuario_id,
         nombre: usuario?.nombre_completo ?? '(sin nombre)',
         email: usuario?.email ?? '',
         rolGrupo: m.rol_grupo,
         lider: m.lider
-      }
+      })
     })
-  }))
-}
-
-export async function obtenerGrupoBase(paraleloId, grupoId) {
-  const grupos = await obtenerGruposBase(paraleloId, grupoId)
-  return grupos[0] ?? null
+    return {
+      id: g.id,
+      numero: g.numero,
+      maxIntegrantes: g.max_integrantes,
+      miembrosPorHemi
+    }
+  })
 }
 
 // Crea un grupo con sus miembros y un tema independiente por hemisemestre.
+// Los miembros se crean en `hemisemestresMiembros` (por defecto, en todos).
 export async function crearGrupo({
   paraleloId,
   numero,
   maxIntegrantes,
   temas,
   hemisemestres,
+  hemisemestresMiembros = null,
   miembros
 }) {
   validarMiembrosGrupo(miembros)
@@ -294,7 +309,10 @@ export async function crearGrupo({
     p_max_integrantes: maxIntegrantes,
     p_temas: temas ?? {},
     p_hemisemestres: hemisemestres ?? [],
-    p_miembros: miembros ?? []
+    p_miembros: miembros ?? [],
+    p_hemisemestres_miembros: hemisemestresMiembros
+      ? hemisemestresMiembros.map(h => ({ id: h.id }))
+      : null
   })
   if (error) throw error
 
@@ -553,13 +571,43 @@ export async function actualizarTemaGrupo(grupoId, hemisemestreId, tema) {
   if (error) throw error
 }
 
-export async function actualizarRolesGrupo(grupoId, miembros) {
+// Actualiza roles y líder de un grupo en los hemisemestres indicados.
+// Si son varios, los integrantes deben ser los mismos en todos ellos.
+export async function actualizarRolesGrupo(grupoId, hemisemestres, miembros) {
+  validarHemisemestres(hemisemestres)
   validarMiembrosGrupo(miembros)
+  const hemiIds = hemisemestres.map(h => h.id)
+  const varios = hemiIds.length > 1
+
+  const { data: actuales, error: errActuales } = await supabase
+    .from('grupo_miembros')
+    .select('usuario_id, hemisemestre_id')
+    .eq('grupo_id', grupoId)
+    .in('hemisemestre_id', hemiIds)
+  if (errActuales) throw errActuales
+
+  const idsEsperados = new Set(miembros.map(m => m.usuarioId))
+  hemisemestres.forEach(h => {
+    const ids = new Set(
+      actuales
+        .filter(a => a.hemisemestre_id === h.id)
+        .map(a => a.usuario_id)
+    )
+    const coinciden =
+      ids.size === idsEsperados.size &&
+      [...idsEsperados].every(id => ids.has(id))
+    if (!coinciden) {
+      throw new Error(
+        `Los integrantes del grupo no coinciden${sufijoHemi(h, varios)}. Actualiza la página e inténtalo de nuevo.`
+      )
+    }
+  })
 
   const { error: quitarLideresError } = await supabase
     .from('grupo_miembros')
     .update({ lider: false })
     .eq('grupo_id', grupoId)
+    .in('hemisemestre_id', hemiIds)
   if (quitarLideresError) throw quitarLideresError
 
   await Promise.all(
@@ -569,147 +617,188 @@ export async function actualizarRolesGrupo(grupoId, miembros) {
         .update({ rol_grupo: miembro.rolGrupo, lider: miembro.lider })
         .eq('grupo_id', grupoId)
         .eq('usuario_id', miembro.usuarioId)
+        .in('hemisemestre_id', hemiIds)
       if (error) throw error
     })
   )
 }
 
-// Mueve un integrante de un grupo a otro, cambiando opcionalmente su rol.
+// Mueve un integrante de un grupo a otro en los hemisemestres indicados,
+// cambiando opcionalmente su rol. Se valida todo antes de escribir.
 export async function moverIntegrante({
   usuarioId,
   grupoOrigenId,
   grupoDestinoId,
   rolGrupo,
   nuevoLiderOrigenId,
-  nuevoEvaluadorOrigenId
+  nuevoEvaluadorOrigenId,
+  hemisemestres
 }) {
+  validarHemisemestres(hemisemestres)
   if (grupoOrigenId === grupoDestinoId) {
     throw new Error(
       'El grupo de destino debe ser diferente al grupo de origen.'
     )
   }
+  const hemiIds = hemisemestres.map(h => h.id)
+  const varios = hemiIds.length > 1
 
   const { data: miembrosActuales, error: errConsulta } = await supabase
     .from('grupo_miembros')
-    .select('grupo_id, usuario_id, rol_grupo, lider')
+    .select('grupo_id, usuario_id, rol_grupo, lider, hemisemestre_id')
     .in('grupo_id', [grupoOrigenId, grupoDestinoId])
+    .in('hemisemestre_id', hemiIds)
   if (errConsulta) throw errConsulta
 
-  const miembro = miembrosActuales.find(
-    m => m.grupo_id === grupoOrigenId && m.usuario_id === usuarioId
-  )
-  if (!miembro)
-    throw new Error('El integrante no pertenece al grupo de origen.')
+  const planes = hemisemestres.map(h => {
+    const sufijo = sufijoHemi(h, varios)
+    const enHemi = miembrosActuales.filter(m => m.hemisemestre_id === h.id)
+    const miembro = enHemi.find(
+      m => m.grupo_id === grupoOrigenId && m.usuario_id === usuarioId
+    )
+    if (!miembro) {
+      throw new Error(`El integrante no pertenece al grupo de origen${sufijo}.`)
+    }
+    const restantesOrigen = enHemi.filter(
+      m => m.grupo_id === grupoOrigenId && m.usuario_id !== usuarioId
+    )
 
-  const miembrosOrigen = miembrosActuales
-    .filter(m => m.grupo_id === grupoOrigenId && m.usuario_id !== usuarioId)
-    .map(m => ({
-      lider: m.usuario_id === nuevoLiderOrigenId || (m.lider && !miembro.lider),
+    const reemplazaLider = miembro.lider
+    if (reemplazaLider && !nuevoLiderOrigenId) {
+      throw new Error(
+        `Selecciona el nuevo líder del grupo de origen antes de mover al líder actual${sufijo}.`
+      )
+    }
+    if (
+      reemplazaLider &&
+      !restantesOrigen.some(m => m.usuario_id === nuevoLiderOrigenId)
+    ) {
+      throw new Error(
+        `El nuevo líder debe pertenecer al grupo de origen${sufijo}.`
+      )
+    }
+
+    const reemplazaEvaluador =
+      miembro.rol_grupo === 'evaluador' && Boolean(nuevoEvaluadorOrigenId)
+    if (
+      reemplazaEvaluador &&
+      !restantesOrigen.some(m => m.usuario_id === nuevoEvaluadorOrigenId)
+    ) {
+      throw new Error(
+        `El nuevo evaluador debe pertenecer al grupo de origen${sufijo}.`
+      )
+    }
+
+    const miembrosOrigen = restantesOrigen.map(m => ({
+      lider: reemplazaLider ? m.usuario_id === nuevoLiderOrigenId : m.lider,
       rolGrupo:
-        m.usuario_id === nuevoEvaluadorOrigenId ? 'evaluador' : m.rol_grupo
+        reemplazaEvaluador && m.usuario_id === nuevoEvaluadorOrigenId
+          ? 'evaluador'
+          : m.rol_grupo
     }))
-  const miembrosDestino = miembrosActuales
-    .filter(m => m.grupo_id === grupoDestinoId)
-    .map(m => ({
-      lider: m.lider,
-      rolGrupo: m.rol_grupo
-    }))
-  miembrosDestino.push({ lider: false, rolGrupo })
+    const miembrosDestino = enHemi
+      .filter(m => m.grupo_id === grupoDestinoId)
+      .map(m => ({ lider: m.lider, rolGrupo: m.rol_grupo }))
+    miembrosDestino.push({ lider: false, rolGrupo })
 
-  const integrantesOrigenDespues = miembrosOrigen.length
-  if (miembro.lider && !nuevoLiderOrigenId) {
-    throw new Error(
-      'Selecciona el nuevo líder del grupo de origen antes de mover al líder actual.'
-    )
-  }
-  validarMiembrosGrupo(miembrosOrigen)
-  validarMiembrosGrupo(miembrosDestino)
+    validarMiembrosGrupo(miembrosOrigen, sufijo)
+    validarMiembrosGrupo(miembrosDestino, sufijo)
 
-  if (
-    miembro.lider &&
-    nuevoLiderOrigenId &&
-    !miembrosActuales.some(
-      m => m.grupo_id === grupoOrigenId && m.usuario_id === nuevoLiderOrigenId
-    )
-  ) {
-    throw new Error('El nuevo líder debe pertenecer al grupo de origen.')
-  }
-  if (
-    miembro.rol_grupo === 'evaluador' &&
-    nuevoEvaluadorOrigenId &&
-    !miembrosActuales.some(
-      m =>
-        m.grupo_id === grupoOrigenId && m.usuario_id === nuevoEvaluadorOrigenId
-    )
-  ) {
-    throw new Error('El nuevo evaluador debe pertenecer al grupo de origen.')
-  }
-
-  // Quitar del grupo origen
-  const { error: errDel } = await supabase
-    .from('grupo_miembros')
-    .delete()
-    .eq('grupo_id', grupoOrigenId)
-    .eq('usuario_id', usuarioId)
-  if (errDel) throw errDel
-
-  // Persistir el reemplazo de líder del grupo origen.
-  if (miembro.lider) {
-    const { error: errNuevoLider } = await supabase
-      .from('grupo_miembros')
-      .update({ lider: true })
-      .eq('grupo_id', grupoOrigenId)
-      .eq('usuario_id', nuevoLiderOrigenId)
-    if (errNuevoLider) throw errNuevoLider
-  }
-
-  // Persistir el reemplazo de evaluador del grupo origen.
-  if (nuevoEvaluadorOrigenId) {
-    const { error: errNuevoEvaluador } = await supabase
-      .from('grupo_miembros')
-      .update({ rol_grupo: 'evaluador' })
-      .eq('grupo_id', grupoOrigenId)
-      .eq('usuario_id', nuevoEvaluadorOrigenId)
-    if (errNuevoEvaluador) throw errNuevoEvaluador
-  }
-
-  // Insertar en el grupo destino
-  const { error: errIns } = await supabase.from('grupo_miembros').insert({
-    grupo_id: grupoDestinoId,
-    usuario_id: usuarioId,
-    rol_grupo: rolGrupo,
-    lider: false
+    return { hemisemestreId: h.id, reemplazaLider, reemplazaEvaluador }
   })
-  if (errIns) throw errIns
+
+  for (const { hemisemestreId, reemplazaLider, reemplazaEvaluador } of planes) {
+    // Quitar del grupo origen
+    const { error: errDel } = await supabase
+      .from('grupo_miembros')
+      .delete()
+      .eq('grupo_id', grupoOrigenId)
+      .eq('usuario_id', usuarioId)
+      .eq('hemisemestre_id', hemisemestreId)
+    if (errDel) throw errDel
+
+    // Persistir el reemplazo de líder del grupo origen.
+    if (reemplazaLider) {
+      const { error: errNuevoLider } = await supabase
+        .from('grupo_miembros')
+        .update({ lider: true })
+        .eq('grupo_id', grupoOrigenId)
+        .eq('usuario_id', nuevoLiderOrigenId)
+        .eq('hemisemestre_id', hemisemestreId)
+      if (errNuevoLider) throw errNuevoLider
+    }
+
+    // Persistir el reemplazo de evaluador del grupo origen.
+    if (reemplazaEvaluador) {
+      const { error: errNuevoEvaluador } = await supabase
+        .from('grupo_miembros')
+        .update({ rol_grupo: 'evaluador' })
+        .eq('grupo_id', grupoOrigenId)
+        .eq('usuario_id', nuevoEvaluadorOrigenId)
+        .eq('hemisemestre_id', hemisemestreId)
+      if (errNuevoEvaluador) throw errNuevoEvaluador
+    }
+
+    // Insertar en el grupo destino
+    const { error: errIns } = await supabase.from('grupo_miembros').insert({
+      grupo_id: grupoDestinoId,
+      usuario_id: usuarioId,
+      hemisemestre_id: hemisemestreId,
+      rol_grupo: rolGrupo,
+      lider: false
+    })
+    if (errIns) throw errIns
+  }
 }
 
-// Añade un estudiante matriculado y actualmente sin grupo a un grupo existente.
+// Añade un estudiante sin grupo a un grupo existente en los hemisemestres
+// indicados.
 export async function agregarIntegranteGrupo({
   grupoId,
   usuarioId,
-  rolGrupo = 'expositor'
+  rolGrupo = 'expositor',
+  hemisemestres
 }) {
+  validarHemisemestres(hemisemestres)
+  const hemiIds = hemisemestres.map(h => h.id)
+  const varios = hemiIds.length > 1
+
   const { data: miembrosActuales, error: errMiembros } = await supabase
     .from('grupo_miembros')
-    .select('usuario_id, rol_grupo, lider')
+    .select('usuario_id, rol_grupo, lider, hemisemestre_id')
     .eq('grupo_id', grupoId)
+    .in('hemisemestre_id', hemiIds)
   if (errMiembros) throw errMiembros
 
-  if (miembrosActuales.some(m => m.usuario_id === usuarioId)) {
-    throw new Error('El estudiante ya pertenece a este grupo.')
-  }
-
-  const { error } = await supabase.from('grupo_miembros').insert({
-    grupo_id: grupoId,
-    usuario_id: usuarioId,
-    rol_grupo: rolGrupo,
-    lider: false
+  hemisemestres.forEach(h => {
+    const sufijo = sufijoHemi(h, varios)
+    const enHemi = miembrosActuales.filter(m => m.hemisemestre_id === h.id)
+    if (enHemi.some(m => m.usuario_id === usuarioId)) {
+      throw new Error(`El estudiante ya pertenece a este grupo${sufijo}.`)
+    }
+    if (
+      rolGrupo === 'evaluador' &&
+      enHemi.some(m => m.rol_grupo === 'evaluador')
+    ) {
+      throw new Error(`Cada grupo puede tener un solo evaluador${sufijo}.`)
+    }
   })
+
+  const { error } = await supabase.from('grupo_miembros').insert(
+    hemiIds.map(hemisemestreId => ({
+      grupo_id: grupoId,
+      usuario_id: usuarioId,
+      hemisemestre_id: hemisemestreId,
+      rol_grupo: rolGrupo,
+      lider: false
+    }))
+  )
   if (error) throw error
 }
 
-// Estudiantes del paralelo sin grupo asignado (para el builder).
-export async function obtenerEstudiantesSinGrupo(paraleloId) {
+// Estudiantes del paralelo sin grupo, por hemisemestre (para el builder).
+// Devuelve Map hemisemestreId → estudiantes[].
+export async function obtenerEstudiantesSinGrupo(paraleloId, hemisemestres) {
   const { data: matriculados, error: errMat } = await supabase
     .from('matriculas')
     .select(
@@ -720,21 +809,30 @@ export async function obtenerEstudiantesSinGrupo(paraleloId) {
 
   const { data: conGrupo, error: errG } = await supabase
     .from('grupo_miembros')
-    .select('usuario_id, grupos!inner(paralelo_id)')
+    .select('usuario_id, hemisemestre_id, grupos!inner(paralelo_id)')
     .eq('grupos.paralelo_id', paraleloId)
   if (errG) throw errG
 
-  const idsConGrupo = new Set(conGrupo.map(r => r.usuario_id))
-  const matriculadosUnicos = new Map(
-    matriculados.map(m => [m.usuario_id, m])
+  const conGrupoPorHemi = new Map(hemisemestres.map(h => [h.id, new Set()]))
+  conGrupo.forEach(r =>
+    conGrupoPorHemi.get(r.hemisemestre_id)?.add(r.usuario_id)
   )
-  return [...matriculadosUnicos.values()]
-    .filter(m => !idsConGrupo.has(m.usuario_id))
-    .map(m => ({
-      usuarioId: m.usuario_id,
-      nombre: m.usuarios?.nombre_completo ?? '—',
-      email: m.usuarios?.email ?? ''
-    }))
+
+  const matriculadosUnicos = [
+    ...new Map(matriculados.map(m => [m.usuario_id, m])).values()
+  ]
+  return new Map(
+    hemisemestres.map(h => [
+      h.id,
+      matriculadosUnicos
+        .filter(m => !conGrupoPorHemi.get(h.id).has(m.usuario_id))
+        .map(m => ({
+          usuarioId: m.usuario_id,
+          nombre: m.usuarios?.nombre_completo ?? '—',
+          email: m.usuarios?.email ?? ''
+        }))
+    ])
+  )
 }
 
 // ---- Matrículas ----
@@ -845,6 +943,9 @@ export async function obtenerPendientesDocente(grupos, hemisemestreId) {
   return pendientes
 }
 
+// Redondea a 1 decimal (evita errores de coma flotante al sumar).
+const redondear1 = valor => Math.round(valor * 10) / 10
+
 export async function obtenerReporteNotasHemisemestre(
   paraleloId,
   hemisemestreId,
@@ -900,12 +1001,12 @@ export async function obtenerReporteNotasHemisemestre(
       const calificacionValida =
         calificacion?.rubrica_id === rubricaDocente ? calificacion : null
       const docente = calificacionValida
-        ? (Number(calificacionValida.puntaje) / maxDoc) * 70
+        ? redondear1((Number(calificacionValida.puntaje) / maxDoc) * 70)
         : null
       // Se usa el promedio actual aunque no todos hayan coevaluado aún.
       const coevaluacion =
         promedio && promedio.cantidad > 0
-          ? (promedio.promedio / maxCoev) * 30
+          ? redondear1((promedio.promedio / maxCoev) * 30)
           : null
 
       if (!calificacionValida) pendientesDocente.push(estudiante.nombre)
@@ -925,7 +1026,7 @@ export async function obtenerReporteNotasHemisemestre(
         coevaluacion,
         final:
           docente !== null && coevaluacion !== null
-            ? docente + coevaluacion
+            ? redondear1(docente + coevaluacion)
             : null
       })
     })
