@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import DetalleCalificacionModal from '../evaluacion/DetalleCalificacionModal.jsx'
 import EditIcon from '@mui/icons-material/Edit'
+import LockIcon from '@mui/icons-material/Lock'
+import LockOpenIcon from '@mui/icons-material/LockOpen'
 import { Badge, Button } from '../ui/index.jsx'
 
 export default function GrupoCard({
@@ -10,6 +12,8 @@ export default function GrupoCard({
   onCalificar,
   onVerAutoevaluacion,
   onToggleCheck,
+  onToggleBloqueo,
+  bloqueoEnCurso,
   esModificado
 }) {
   const [detalle, setDetalle] = useState(null)
@@ -60,12 +64,16 @@ export default function GrupoCard({
           const calif = mapaCalif.get(m.usuarioId)
           const nota = mapaNotas.get(m.usuarioId)
           const coevaluado = nota?.coevaluado === true
+          const bloqueado = Boolean(m.coevaluacionBloqueada)
+          const cambiandoBloqueo = Boolean(bloqueoEnCurso?.(m.usuarioId))
           const esEval = m.rolGrupo === 'evaluador'
           const rolLabel = esEval ? 'Evaluador' : 'Expositor'
           return (
             <li
               key={m.usuarioId}
-              className="flex flex-col gap-2 bg-surface rounded-sm px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center"
+              className={`flex flex-col gap-2 bg-surface rounded-sm px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center ${
+                bloqueado ? 'border-l-[3px] border-sice-red/60' : ''
+              }`}
             >
               <div className="min-w-0 w-full sm:flex-1 sm:min-w-[180px]">
                 <p className="text-sm font-semibold break-words leading-snug">
@@ -85,10 +93,38 @@ export default function GrupoCard({
                 ) : (
                   <Badge variant="pending">Pendiente</Badge>
                 )}
-                {coevaluado && <Badge variant="info">Coevaluado</Badge>}
+                {bloqueado ? (
+                  <Badge variant="blocked">
+                    <LockIcon style={{ width: '0.875rem', height: '0.875rem' }} />
+                    Coevaluación bloqueada
+                  </Badge>
+                ) : (
+                  coevaluado && <Badge variant="info">Coevaluado</Badge>
+                )}
               </div>
 
-              <div className="flex items-center gap-1.5 sm:ml-auto">
+              <div className="flex flex-wrap items-center gap-1.5 sm:ml-auto">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={cambiandoBloqueo}
+                  onClick={() => onToggleBloqueo(m)}
+                  title={
+                    bloqueado
+                      ? 'Permitir de nuevo que los demás estudiantes coevalúen a este integrante'
+                      : 'Usar si el estudiante no presentó con su grupo: nadie podrá coevaluarlo y su coevaluación contará como 0'
+                  }
+                >
+                  {bloqueado ? (
+                    <>
+                      <LockOpenIcon className="w-4 h-4" /> Desbloquear
+                    </>
+                  ) : (
+                    <>
+                      <LockIcon className="w-4 h-4" /> Bloquear coev.
+                    </>
+                  )}
+                </Button>
                 <Button
                   size="sm"
                   variant="ghost"

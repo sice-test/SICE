@@ -186,7 +186,7 @@ export async function obtenerGruposConDetalle(paraleloId, hemisemestreId) {
       `
       id, numero, max_integrantes,
       grupo_temas!inner ( id, tema, hemisemestre_id, coevaluacion_habilitada ),
-      grupo_miembros ( usuario_id, rol_grupo, lider, hemisemestre_id )
+      grupo_miembros ( usuario_id, rol_grupo, lider, hemisemestre_id, coevaluacion_bloqueada )
     `
     )
     .eq('paralelo_id', paraleloId)
@@ -229,10 +229,58 @@ export async function obtenerGruposConDetalle(paraleloId, hemisemestreId) {
         usuarioId: m.usuario_id,
         nombre: usuario?.nombre_completo ?? '(sin nombre)',
         rolGrupo: m.rol_grupo,
-        lider: m.lider
+        lider: m.lider,
+        coevaluacionBloqueada: Boolean(m.coevaluacion_bloqueada)
       }
     })
   }))
+}
+
+// Integrantes de un grupo que pueden recibir coevaluación (excluye a los
+// estudiantes bloqueados individualmente por el docente).
+export function miembrosCoevaluables(grupo) {
+  return (grupo?.miembros ?? []).filter(m => !m.coevaluacionBloqueada)
+}
+
+// Bloquea o desbloquea la coevaluación de un estudiante en un hemisemestre.
+export async function actualizarBloqueoCoevaluacionEstudiante({
+  grupoId,
+  usuarioId,
+  hemisemestreId,
+  bloqueada
+}) {
+  const { data, error } = await supabase
+    .from('grupo_miembros')
+    .update({ coevaluacion_bloqueada: Boolean(bloqueada) })
+    .eq('grupo_id', grupoId)
+    .eq('usuario_id', usuarioId)
+    .eq('hemisemestre_id', hemisemestreId)
+    .select('id')
+  if (error) throw error
+  if (!data || data.length === 0) {
+    throw new Error(
+      'No se pudo actualizar la coevaluación del estudiante. Asegúrate de haber ejecutado la migración de bloqueo individual en Supabase.'
+    )
+  }
+}
+
+// Hemisemestres (ids) en los que la coevaluación del estudiante está bloqueada.
+export async function obtenerBloqueosCoevaluacionEstudiante(
+  usuarioId,
+  hemisemestreIds
+) {
+  if (!usuarioId || hemisemestreIds.length === 0) return new Set()
+  const { data, error } = await supabase
+    .from('grupo_miembros')
+    .select('hemisemestre_id, coevaluacion_bloqueada')
+    .eq('usuario_id', usuarioId)
+    .in('hemisemestre_id', hemisemestreIds)
+  if (error) throw error
+  return new Set(
+    (data ?? [])
+      .filter(fila => fila.coevaluacion_bloqueada)
+      .map(fila => fila.hemisemestre_id)
+  )
 }
 
 // Para el builder del Admin: grupos con los miembros de cada hemisemestre.
@@ -998,19 +1046,26 @@ export async function obtenerReporteNotasHemisemestre(
         ? rubricas.coevEvaluadorMax
         : rubricas.coevExpositorMax
       const promedio = promediosPorEstudiante.get(estudiante.usuarioId)
+      const bloqueado = estudiante.coevaluacionBloqueada
       const calificacionValida =
         calificacion?.rubrica_id === rubricaDocente ? calificacion : null
       const docente = calificacionValida
         ? redondear1((Number(calificacionValida.puntaje) / maxDoc) * 70)
         : null
       // Se usa el promedio actual aunque no todos hayan coevaluado aún.
-      const coevaluacion =
-        promedio && promedio.cantidad > 0
+      // Si el docente bloqueó su coevaluación, este componente vale 0.
+      const coevaluacion = bloqueado
+        ? 0
+        : promedio && promedio.cantidad > 0
           ? redondear1((promedio.promedio / maxCoev) * 30)
           : null
 
       if (!calificacionValida) pendientesDocente.push(estudiante.nombre)
-      if (esperadas > 0 && (!promedio || promedio.cantidad < esperadas)) {
+      if (
+        !bloqueado &&
+        esperadas > 0 &&
+        (!promedio || promedio.cantidad < esperadas)
+      ) {
         pendientesCoevaluacion.set(grupo.id, {
           grupoNumero: grupo.numero,
           faltantes: esperadas - (promedio?.cantidad ?? 0)
@@ -1022,6 +1077,7 @@ export async function obtenerReporteNotasHemisemestre(
         usuarioId: estudiante.usuarioId,
         grupoNumero: grupo.numero,
         rol: esEvaluador ? 'Evaluador' : 'Expositor',
+        coevaluacionBloqueada: bloqueado,
         docente,
         coevaluacion,
         final:
@@ -1085,7 +1141,11 @@ export async function obtenerResumenCoevaluacionEstudiantes(
     })
   })
 
-  const gruposActivos = grupos.filter(grupo => grupo.coevaluacionHabilitada)
+  // Grupos habilitados con al menos un integrante que pueda coevaluarse.
+  const gruposActivos = grupos
+    .filter(grupo => grupo.coevaluacionHabilitada)
+    .map(grupo => ({ ...grupo, miembros: miembrosCoevaluables(grupo) }))
+    .filter(grupo => grupo.miembros.length > 0)
 
   const estudiantes = [...estudiantesPorId.values()]
   const resumen = await Promise.all(
@@ -1143,6 +1203,24 @@ export async function yaCoevaluoGrupo(
     (data ?? []).map(fila => fila.estudiante_evaluado_id)
   )
   return estudianteIds.every(id => evaluados.has(id))
+}
+
+// Integrantes ya coevaluados por un evaluador en un hemisemestre.
+// Devuelve Map grupoId → Set(estudianteEvaluadoId).
+export async function obtenerEvaluadosPorGrupo(evaluadorId, hemisemestreId) {
+  const { data, error } = await supabase
+    .from('coevaluaciones')
+    .select('grupo_evaluado_id, estudiante_evaluado_id')
+    .eq('evaluador_id', evaluadorId)
+    .eq('hemisemestre_id', hemisemestreId)
+  if (error) throw error
+  const mapa = new Map()
+  ;(data ?? []).forEach(fila => {
+    const evaluados = mapa.get(fila.grupo_evaluado_id) ?? new Set()
+    evaluados.add(fila.estudiante_evaluado_id)
+    mapa.set(fila.grupo_evaluado_id, evaluados)
+  })
+  return mapa
 }
 
 export async function guardarCoevaluacion({

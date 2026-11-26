@@ -5,6 +5,10 @@ import { Button } from '../ui/index.jsx'
 
 export default function TarjetaCoevaluacion({ grupo, realizada, onCoevaluar }) {
   const integrantes = grupo.miembros.map(m => m.nombre).join(', ')
+  // Coevaluación parcial: ya evaluó a parte del grupo y faltan integrantes
+  // (p. ej. uno desbloqueado por el docente después).
+  const pendientes = grupo.pendientes ?? grupo.miembros
+  const parcial = pendientes.length > 0 && pendientes.length < grupo.miembros.length
 
   return (
     <div className="bg-white border border-black/[0.11] rounded-DEFAULT shadow-card p-5 flex flex-col h-full">
@@ -28,6 +32,19 @@ export default function TarjetaCoevaluacion({ grupo, realizada, onCoevaluar }) {
             <p className="text-[11px] text-ink-soft">
               El docente habilitará este grupo cuando finalice su exposición.
             </p>
+          </div>
+        ) : parcial ? (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] text-ink-soft">
+              Ya coevaluaste a este grupo. Falta:{' '}
+              <strong>{pendientes.map(m => m.nombre).join(', ')}</strong>
+            </p>
+            <Button className="w-full" onClick={onCoevaluar}>
+              <RateReviewIcon className="w-4 h-4" /> Coevaluar{' '}
+              {pendientes.length === 1
+                ? 'integrante pendiente'
+                : `${pendientes.length} integrantes pendientes`}
+            </Button>
           </div>
         ) : (
           <Button className="w-full" onClick={onCoevaluar}>

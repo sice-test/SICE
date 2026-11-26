@@ -50,7 +50,8 @@ export function Badge({ children, variant = 'ok' }) {
   const variants = {
     ok: 'bg-sice-green-soft text-sice-green dark:text-emerald-200',
     pending: 'bg-sice-amber-soft text-sice-amber dark:text-amber-200',
-    info: 'bg-gold-soft text-gold dark:text-gold-dim'
+    info: 'bg-gold-soft text-gold dark:text-gold-dim',
+    blocked: 'bg-sice-red-soft text-sice-red dark:text-red-200'
   }
   return (
     <span

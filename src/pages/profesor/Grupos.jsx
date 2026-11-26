@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useOutletContext, useNavigate } from 'react-router-dom'
 import {
   obtenerGruposConDetalle,
@@ -8,6 +8,7 @@ import {
   finalizarAsignacion,
   reabrirAsignacion,
   guardarEstadosCoevaluacion,
+  actualizarBloqueoCoevaluacionEstudiante,
   obtenerEstadoAutoevaluacion,
   configurarAutoevaluacion,
   obtenerMapaAutoevaluaciones
@@ -40,10 +41,13 @@ export default function Grupos() {
   const [guardandoEstado, setGuardandoEstado] = useState(false)
   const [guardandoCoeval, setGuardandoCoeval] = useState(false)
   const [estadosGuardados, setEstadosGuardados] = useState(new Map())
+  // Copia síncrona de estadosGuardados para las recargas silenciosas.
+  const estadosGuardadosRef = useRef(new Map())
   const [mensajeExito, setMensajeExito] = useState('')
   const [autoevaluacionHabilitada, setAutoevaluacionHabilitada] =
     useState(false)
   const [guardandoAutoevaluacion, setGuardandoAutoevaluacion] = useState(false)
+  const [bloqueosEnCurso, setBloqueosEnCurso] = useState(new Set())
   const usaAsignacionAutonoma = [
     'Sistemas Digitales',
     'Plataformas de Hardware'
@@ -85,6 +89,11 @@ export default function Grupos() {
     onChange: ({ silent } = {}) => cargar(silent)
   })
 
+  function fijarEstadosGuardados(mapa) {
+    estadosGuardadosRef.current = mapa
+    setEstadosGuardados(mapa)
+  }
+
   async function cargar(silenciosa = false) {
     if (!silenciosa) setCargando(true)
     setError('')
@@ -95,9 +104,29 @@ export default function Grupos() {
         obtenerEstadoAutoevaluacion(contexto.paraleloId, hemisemestreActivo.id)
       ])
       // Conserva los grupos visibles aunque falle una consulta secundaria,
-      // como calificaciones o promedios.
-      setGrupos(gs)
-      setEstadosGuardados(
+      // como calificaciones o promedios. En recargas silenciosas (realtime o
+      // tras bloquear a un estudiante) se mantienen los cambios de
+      // habilitación de grupos que el docente aún no ha guardado.
+      const guardadosPrevios = estadosGuardadosRef.current
+      setGrupos(prev => {
+        if (!silenciosa) return gs
+        const pendientes = new Map(
+          prev
+            .filter(
+              g =>
+                guardadosPrevios.has(g.id) &&
+                Boolean(guardadosPrevios.get(g.id)) !==
+                  Boolean(g.coevaluacionHabilitada)
+            )
+            .map(g => [g.id, g.coevaluacionHabilitada])
+        )
+        return gs.map(g =>
+          pendientes.has(g.id)
+            ? { ...g, coevaluacionHabilitada: pendientes.get(g.id) }
+            : g
+        )
+      })
+      fijarEstadosGuardados(
         new Map(gs.map(g => [g.id, Boolean(g.coevaluacionHabilitada)]))
       )
       setEstadoAsignacion(estado)
@@ -170,14 +199,19 @@ export default function Grupos() {
                 (Number(autoCoev.puntaje) / puntajeMaximo(rubricaAutoCoev)) * 30
               : null
           const docente = calif ? (calif.puntaje / maxDoc) * 100 : null
-          const coevaluacion = promedio
-            ? (promedio.promedio / maxCoev) * 100
-            : null
+          // Coevaluación bloqueada por el docente: el componente vale 0.
+          const coevaluacion = m.coevaluacionBloqueada
+            ? 0
+            : promedio
+              ? (promedio.promedio / maxCoev) * 100
+              : null
           notas.set(m.usuarioId, {
             docente,
             coevaluacion,
             coevaluado:
-              promedio !== null && promedio.cantidad >= coevaluacionesEsperadas,
+              !m.coevaluacionBloqueada &&
+              promedio !== null &&
+              promedio.cantidad >= coevaluacionesEsperadas,
             final:
               docente !== null && coevaluacion !== null
                 ? docente * 0.7 + coevaluacion * 0.3
@@ -230,6 +264,52 @@ export default function Grupos() {
     )
   }
 
+  async function handleToggleBloqueo(grupoId, miembro) {
+    const bloqueada = !miembro.coevaluacionBloqueada
+    const clave = `${grupoId}:${miembro.usuarioId}`
+    setError('')
+    setMensajeExito('')
+    setBloqueosEnCurso(prev => new Set(prev).add(clave))
+    try {
+      await actualizarBloqueoCoevaluacionEstudiante({
+        grupoId,
+        usuarioId: miembro.usuarioId,
+        hemisemestreId: hemisemestreActivo.id,
+        bloqueada
+      })
+      setGrupos(prev =>
+        prev.map(g =>
+          g.id === grupoId
+            ? {
+                ...g,
+                miembros: g.miembros.map(m =>
+                  m.usuarioId === miembro.usuarioId
+                    ? { ...m, coevaluacionBloqueada: bloqueada }
+                    : m
+                )
+              }
+            : g
+        )
+      )
+      notificar.exito(
+        bloqueada
+          ? `Coevaluación bloqueada para ${miembro.nombre}.`
+          : `Coevaluación desbloqueada para ${miembro.nombre}.`
+      )
+      await cargar(true)
+    } catch (e) {
+      const mensaje = `Error al cambiar la coevaluación del estudiante: ${e.message}`
+      setError(mensaje)
+      notificar.error(mensaje)
+    } finally {
+      setBloqueosEnCurso(prev => {
+        const siguiente = new Set(prev)
+        siguiente.delete(clave)
+        return siguiente
+      })
+    }
+  }
+
   function handleToggleTodas(habilitar) {
     setMensajeExito('')
     setError('')
@@ -256,7 +336,7 @@ export default function Grupos() {
     setMensajeExito('')
     try {
       await guardarEstadosCoevaluacion(grupos, hemisemestreActivo.id)
-      setEstadosGuardados(
+      fijarEstadosGuardados(
         new Map(grupos.map(g => [g.id, Boolean(g.coevaluacionHabilitada)]))
       )
       setMensajeExito('Se guardaron correctamente los cambios de coevaluación.')
@@ -330,7 +410,9 @@ export default function Grupos() {
           <h1>Grupos y temas</h1>
           <p className="text-sm text-ink-soft mt-1">
             Selecciona un integrante para registrar o editar su calificación.
-            Habilita la coevaluación conforme los grupos vayan exponiendo.
+            Habilita la coevaluación conforme los grupos vayan exponiendo. Si
+            un estudiante no presentó con su grupo, bloquea su coevaluación de
+            forma individual.
           </p>
           {usaAsignacionAutonoma ? (
             <div className="flex flex-wrap items-center gap-3 mt-4">
@@ -441,6 +523,10 @@ export default function Grupos() {
                 Boolean(g.coevaluacionHabilitada)
               }
               onToggleCheck={handleToggleCheck}
+              onToggleBloqueo={miembro => handleToggleBloqueo(g.id, miembro)}
+              bloqueoEnCurso={usuarioId =>
+                bloqueosEnCurso.has(`${g.id}:${usuarioId}`)
+              }
               onCalificar={(personaId, nombreEstudiante, rolGrupo) =>
                 navigate(`/profesor/calificar/${personaId}`, {
                   state: {

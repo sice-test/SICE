@@ -4,7 +4,8 @@ import confetti from 'canvas-confetti'
 import { useAuth } from '../../context/AuthContext.jsx'
 import {
   obtenerCalificacionDocente,
-  obtenerPromedioCoeval
+  obtenerPromedioCoeval,
+  obtenerBloqueosCoevaluacionEstudiante
 } from '../../lib/data.js'
 import { obtenerRubrica, puntajeMaximo } from '../../lib/rubricas.js'
 import RubricaForm from '../../components/evaluacion/RubricaForm.jsx'
@@ -48,6 +49,12 @@ export default function Notas() {
         schema: 'public',
         table: 'coevaluaciones',
         filter: `estudiante_evaluado_id=eq.${perfil?.id}`
+      },
+      {
+        event: '*',
+        schema: 'public',
+        table: 'grupo_miembros',
+        filter: `usuario_id=eq.${perfil?.id}`
       }
     ],
     [perfil?.id]
@@ -100,11 +107,15 @@ export default function Notas() {
     if (!silenciosa) setCargando(true)
     setError('')
     try {
-      const [docExp, docEval, coevExp, coevEval] = await Promise.all([
+      const [docExp, docEval, coevExp, coevEval, bloqueos] = await Promise.all([
         obtenerRubrica('CALIF_EXPOSITOR'),
         obtenerRubrica('CALIF_EVALUADOR'),
         obtenerRubrica('COEVAL_EXPOSITOR'),
-        obtenerRubrica('COEVAL_EVALUADOR')
+        obtenerRubrica('COEVAL_EVALUADOR'),
+        obtenerBloqueosCoevaluacionEstudiante(
+          perfil.id,
+          hemisemestres.map(hs => hs.id)
+        )
       ])
 
       const bs = await Promise.all(
@@ -133,7 +144,13 @@ export default function Notas() {
             ? (califDoc.puntaje / maxDoc) * 100
             : null
 
-          const coevSobre100 = coeval ? (coeval.promedio / maxCoev) * 100 : null
+          // Si el docente bloqueó su coevaluación, el componente vale 0.
+          const coevBloqueada = bloqueos.has(hs.id)
+          const coevSobre100 = coevBloqueada
+            ? 0
+            : coeval
+              ? (coeval.promedio / maxCoev) * 100
+              : null
 
           // Aplicar la ponderación correspondiente a cada componente
           const docPonderado =
@@ -154,6 +171,7 @@ export default function Notas() {
             coevPonderado,
             final,
             incompleto: docPonderado === null || coevPonderado === null,
+            coevBloqueada,
             comentario: califDoc?.comentario ?? null,
             califDoc,
             rubricaDoc
@@ -199,6 +217,7 @@ export default function Notas() {
           coevPonderado,
           final,
           incompleto,
+          coevBloqueada,
           comentario,
           califDoc,
           rubricaDoc
@@ -311,6 +330,14 @@ export default function Notas() {
                     className="py-2.5 border-b border-black/[0.07]"
                     // textoPendiente="— pendiente"
                   />
+
+                  {coevBloqueada && (
+                    <p className="text-xs text-sice-red dark:text-red-300 mt-2">
+                      El docente bloqueó tu coevaluación en este hemisemestre
+                      (no presentaste con tu grupo), por lo que este componente
+                      cuenta como 0.
+                    </p>
+                  )}
 
                   <div className="mt-3 pt-3 border-black/10 flex justify-between items-baseline">
                     <span className="text-sm font-semibold">

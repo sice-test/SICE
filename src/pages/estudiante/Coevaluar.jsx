@@ -1,7 +1,11 @@
 import { useEffect, useState, useRef } from 'react'
 import { useOutletContext, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext.jsx'
-import { obtenerGruposConDetalle, yaCoevaluoGrupo } from '../../lib/data.js'
+import {
+  obtenerGruposConDetalle,
+  obtenerEvaluadosPorGrupo,
+  miembrosCoevaluables
+} from '../../lib/data.js'
 import {
   Eyebrow,
   StatCard,
@@ -38,21 +42,27 @@ export default function Coevaluar() {
     if (!silenciosa) setCargando(true)
     setError('')
     try {
-      const todos = await obtenerGruposConDetalle(
-        contexto.paraleloId,
-        hemisemestreActivo.id
-      )
-      const otros = todos.filter(g => g.id !== contexto.grupoId)
-      const checks = await Promise.all(
-        otros.map(g =>
-          yaCoevaluoGrupo(
-            perfil.id,
-            g.id,
-            hemisemestreActivo.id,
-            g.miembros.map(m => m.usuarioId)
-          )
-        )
-      )
+      const [todos, evaluadosPorGrupo] = await Promise.all([
+        obtenerGruposConDetalle(contexto.paraleloId, hemisemestreActivo.id),
+        obtenerEvaluadosPorGrupo(perfil.id, hemisemestreActivo.id)
+      ])
+      // Solo se coevalúa a los integrantes no bloqueados por el docente; un
+      // grupo sin integrantes coevaluables no se muestra. `pendientes` son
+      // los integrantes que este estudiante aún no ha coevaluado (p. ej. uno
+      // que el docente desbloqueó después), para no repetir a los demás.
+      const otros = todos
+        .filter(g => g.id !== contexto.grupoId)
+        .map(g => {
+          const miembros = miembrosCoevaluables(g)
+          const evaluados = evaluadosPorGrupo.get(g.id) ?? new Set()
+          return {
+            ...g,
+            miembros,
+            pendientes: miembros.filter(m => !evaluados.has(m.usuarioId))
+          }
+        })
+        .filter(g => g.miembros.length > 0)
+      const checks = otros.map(g => g.pendientes.length === 0)
       if (version !== cargarVersionRef.current) return
       setGrupos(otros)
       setEstados(checks)
@@ -149,7 +159,7 @@ export default function Coevaluar() {
                       tema: g.tema,
                       hemisemestreId: hemisemestreActivo.id,
                       hemisemestreNombre: hemisemestreActivo.nombre,
-                      miembros: g.miembros,
+                      miembros: g.pendientes,
                       coevaluacionHabilitada: g.coevaluacionHabilitada
                     }
                   })

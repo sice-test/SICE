@@ -141,6 +141,10 @@ create table public.grupo_miembros (
   rol_grupo       text not null check (rol_grupo in ('expositor', 'evaluador')),
   -- "lider" reemplaza a "coordinador"; hay uno por grupo y hemisemestre
   lider           boolean not null default false,
+  -- El docente puede bloquear la coevaluación de un estudiante concreto
+  -- (p. ej. no presentó el trabajo con su grupo). Sus compañeros de otros
+  -- grupos no lo coevalúan y su componente de coevaluación cuenta como 0.
+  coevaluacion_bloqueada boolean not null default false,
   constraint grupo_miembros_usuario_hemisemestre_key
     unique (usuario_id, hemisemestre_id)
 );
@@ -294,6 +298,15 @@ begin
       and gt.coevaluacion_habilitada = true
   ) then
     raise exception 'La coevaluación para este grupo aún no está habilitada';
+  end if;
+  if not public.es_admin() and exists (
+    select 1 from public.grupo_miembros gm
+    where gm.usuario_id = new.estudiante_evaluado_id
+      and gm.grupo_id = new.grupo_evaluado_id
+      and gm.hemisemestre_id = new.hemisemestre_id
+      and gm.coevaluacion_bloqueada
+  ) then
+    raise exception 'La coevaluación de este estudiante fue bloqueada por el docente';
   end if;
   return new;
 end;
