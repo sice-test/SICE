@@ -15,7 +15,6 @@ import {
   Button,
   Aviso,
   Spinner,
-  Campo,
   Input,
   Select,
   Badge
@@ -50,13 +49,12 @@ export default function StepGrupos({
   paraleloId,
   paralelos,
   hemisemestres,
-  hemisemestreInicialId,
+  hemisemestreActivo,
   onParaleloSeleccionado,
   onRetroceder
 }) {
   const [sinGrupoPorHemi, setSinGrupoPorHemi] = useState(new Map())
   const [gruposBase, setGruposBase] = useState([])
-  const [hemiId, setHemiId] = useState(hemisemestreInicialId ?? null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState('')
   const [modoEditar, setModoEditar] = useState(null) // grupoId del grupo en edición de tema
@@ -75,9 +73,13 @@ export default function StepGrupos({
     'Plataformas de Hardware'
   ].includes(paraleloActual?.materiaNombre)
 
-  // Hemisemestre en edición y el otro (para "aplicar también en…").
+  // Hemisemestre en edición: el seleccionado en el sidebar de la Shell. Si
+  // Admin trabaja con otro paralelo, se usa el hemi del mismo orden.
   const hemiActual =
-    hemisemestres.find(h => h.id === hemiId) ?? hemisemestres[0] ?? null
+    hemisemestres.find(h => h.id === hemisemestreActivo?.id) ??
+    hemisemestres.find(h => h.orden === hemisemestreActivo?.orden) ??
+    hemisemestres[0] ??
+    null
   const otroHemi = hemisemestres.find(h => h.id !== hemiActual?.id) ?? null
   const claveHemisemestres = hemisemestres.map(h => h.id).join(',')
 
@@ -141,17 +143,6 @@ export default function StepGrupos({
   useEffect(() => {
     cargar()
   }, [paraleloId, claveHemisemestres])
-
-  // Si cambia el paralelo, conserva el hemi elegido solo si sigue existiendo.
-  useEffect(() => {
-    if (!hemisemestres.some(h => h.id === hemiId)) {
-      setHemiId(
-        hemisemestres.find(h => h.id === hemisemestreInicialId)?.id ??
-          hemisemestres[0]?.id ??
-          null
-      )
-    }
-  }, [claveHemisemestres])
 
   useEffect(() => {
     if (!modoEdicion) {
@@ -273,13 +264,6 @@ export default function StepGrupos({
               onChange={seleccionarParalelo}
             />
           </div>
-          {hemisemestres.length > 1 && (
-            <SelectorHemisemestre
-              hemisemestres={hemisemestres}
-              value={hemiActual?.id}
-              onChange={setHemiId}
-            />
-          )}
           <Button
             size="sm"
             variant="outline"
@@ -307,7 +291,8 @@ export default function StepGrupos({
 
       {otroHemi && grupos.length > 0 && (
         <Aviso dismissible>
-          Estás viendo los grupos del {hemiActual?.nombre?.toLowerCase()}. Al crearse, los
+          Estás viendo los grupos del {hemiActual?.nombre?.toLowerCase()}{' '}
+          (cámbialo con las pestañas Hemi 1 / Hemi 2 del menú lateral). Al crearse, los
           grupos y roles son iguales en ambos hemisemestres; los cambios que
           hagas aquí se aplican solo a {etiquetaHemisemestre(hemiActual)}, salvo
           que marques «Aplicar también en {etiquetaHemisemestre(otroHemi)}».
@@ -484,30 +469,6 @@ export default function StepGrupos({
         </Button>
       </div>
     </div>
-  )
-}
-
-function SelectorHemisemestre({ hemisemestres, value, onChange }) {
-  return (
-    <Campo label="Hemisemestre en edición">
-      <div className="inline-flex gap-1 bg-surface rounded-sm p-0.5 border border-black/10 dark:border-white/10">
-        {hemisemestres.map(h => (
-          <button
-            key={h.id}
-            type="button"
-            onClick={() => onChange(h.id)}
-            aria-pressed={value === h.id}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-[4px] transition-colors ${
-              value === h.id
-                ? 'bg-gold text-white'
-                : 'text-ink-soft hover:text-ink-mid'
-            }`}
-          >
-            {etiquetaHemisemestre(h)}
-          </button>
-        ))}
-      </div>
-    </Campo>
   )
 }
 

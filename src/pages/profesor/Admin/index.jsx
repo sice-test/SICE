@@ -107,7 +107,7 @@ export default function Admin() {
           paraleloId={paraleloId}
           paralelos={paralelos}
           hemisemestres={hemisemestres}
-          hemisemestreInicialId={hemisemestreActivo?.id}
+          hemisemestreActivo={hemisemestreActivo}
           onParaleloSeleccionado={actualizarParalelo}
           onRetroceder={retroceder}
         />
