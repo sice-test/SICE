@@ -30,12 +30,15 @@ export function descargarReporteNotasExcel({
       ]
     })
   ]
+  const filasOrdenadas = [...filas].sort((a, b) =>
+    a.nombre.localeCompare(b.nombre, 'es', { sensitivity: 'base' })
+  )
 
   const filasHoja = [
     [titulo, ...Array(encabezados.length - 1).fill('')],
     [subtitulo, ...Array(encabezados.length - 1).fill('')],
     encabezados,
-    ...filas.map(fila => [
+    ...filasOrdenadas.map(fila => [
       fila.nombre,
       `Grupo ${fila.grupoNumero}`,
       fila.rol,
@@ -44,7 +47,7 @@ export function descargarReporteNotasExcel({
         return [
           formatearNumero(nota?.docente),
           formatearNumero(nota?.coevaluacion),
-          formatearNumero(nota?.final)
+          formatearNotaFinal(nota?.final)
         ]
       })
     ])
@@ -94,4 +97,10 @@ function formatearNumero(valor) {
   return valor === null || valor === undefined
     ? 'Pendiente'
     : { t: 'n', v: Number(valor.toFixed(1)), z: '0.0' }
+}
+
+function formatearNotaFinal(valor) {
+  return valor === null || valor === undefined
+    ? 'Pendiente'
+    : { t: 'n', v: Number((valor / 10).toFixed(2)), z: '0.00' }
 }
